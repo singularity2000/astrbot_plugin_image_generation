@@ -21,11 +21,11 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 
 @register(
-    "astrbot_plugin_shoubanhua",
+    "astrbot_plugin_siliconflow-shouban",
     "shskjw",
-    "通过第三方api进行手办化等功能",
-    "1.3.2",  # 适配 SiliconFlow
-    "https://github.com/shkjw/astrbot_plugin_shoubanhua",
+    "接入硅基流动画图，图片编辑，可自定义预设",
+    "1.0.0"
+    "https://github.com/shkjw/astrbot_plugin_siliconflow-shouban",
 )
 class FigurineProPlugin(Star):
     class ImageWorkflow:
@@ -654,4 +654,5 @@ class FigurineProPlugin(Star):
 
     async def terminate(self):
         if self.iwf: await self.iwf.terminate()
+
         logger.info("[FigurinePro] 插件已终止")
