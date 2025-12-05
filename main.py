@@ -401,6 +401,66 @@ class FigurineProPlugin(Star):
         except Exception as e:
             logger.error(f"保存用户次数文件时发生错误: {e}", exc_info=True)
 
+    async def _load_group_counts(self):
+        if not self.group_counts_file.exists(): self.group_counts = {}; return
+        loop = asyncio.get_running_loop()
+        try:
+            content = await loop.run_in_executor(None, self.group_counts_file.read_text, "utf-8")
+            data = await loop.run_in_executor(None, json.loads, content)
+            if isinstance(data, dict): self.group_counts = {str(k): v for k, v in data.items()}
+        except Exception as e:
+            logger.error(f"加载群组次数文件时发生错误: {e}", exc_info=True); self.group_counts = {}
+
+    async def _save_group_counts(self):
+        loop = asyncio.get_running_loop()
+        try:
+            json_data = await loop.run_in_executor(None,
+                                                   functools.partial(json.dumps, self.group_counts, ensure_ascii=False,
+                                                                     indent=4))
+            await loop.run_in_executor(None, self.group_counts_file.write_text, json_data, "utf-8")
+        except Exception as e:
+            logger.error(f"保存群组次数文件时发生错误: {e}", exc_info=True)
+
+    async def _load_user_daily_counts(self):
+        if not self.user_daily_counts_file.exists(): self.user_daily_counts = {}; return
+        loop = asyncio.get_running_loop()
+        try:
+            content = await loop.run_in_executor(None, self.user_daily_counts_file.read_text, "utf-8")
+            data = await loop.run_in_executor(None, json.loads, content)
+            if isinstance(data, dict): self.user_daily_counts = {str(k): v for k, v in data.items()}
+        except Exception as e:
+            logger.error(f"加载用户每日次数文件时发生错误: {e}", exc_info=True); self.user_daily_counts = {}
+
+    async def _save_user_daily_counts(self):
+        loop = asyncio.get_running_loop()
+        try:
+            json_data = await loop.run_in_executor(None,
+                                                   functools.partial(json.dumps, self.user_daily_counts,
+                                                                     ensure_ascii=False, indent=4))
+            await loop.run_in_executor(None, self.user_daily_counts_file.write_text, json_data, "utf-8")
+        except Exception as e:
+            logger.error(f"保存用户每日次数文件时发生错误: {e}", exc_info=True)
+
+    async def _load_group_daily_counts(self):
+        if not self.group_daily_counts_file.exists(): self.group_daily_counts = {}; return
+        loop = asyncio.get_running_loop()
+        try:
+            content = await loop.run_in_executor(None, self.group_daily_counts_file.read_text, "utf-8")
+            data = await loop.run_in_executor(None, json.loads, content)
+            if isinstance(data, dict): self.group_daily_counts = {str(k): v for k, v in data.items()}
+        except Exception as e:
+            logger.error(f"加载群组每日次数文件时发生错误: {e}", exc_info=True); self.group_daily_counts = {}
+
+    async def _save_group_daily_counts(self):
+        loop = asyncio.get_running_loop()
+        try:
+            json_data = await loop.run_in_executor(None,
+                                                   functools.partial(json.dumps, self.group_daily_counts,
+                                                                     ensure_ascii=False, indent=4))
+            await loop.run_in_executor(None, self.group_daily_counts_file.write_text, json_data, "utf-8")
+        except Exception as e:
+            logger.error(f"保存群组每日次数文件时发生错误: {e}", exc_info=True)
+
     def _get_user_count(self, user_id: str) -> int:
         permanent_count = self.user_counts.get(str(user_id), 0)
         
