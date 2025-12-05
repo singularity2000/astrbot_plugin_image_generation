@@ -1,5 +1,5 @@
 name: astrbot_plugin_image_generation
-desc: 适配图像生成模型，图片编辑，可自定义预设，优化指令
+desc: 文生图、图生图，可自定义提示词模板，兼容 OpenAI v1/resposnes 端点
 help: 通过第三方api进行图像生成的插件，支持图生图和文生图，可自定义预设指令
 version: v2.0.0
 author: Singularity2000

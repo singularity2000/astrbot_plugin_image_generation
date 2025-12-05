@@ -39,10 +39,10 @@
         "default": true
     },
     "extra_prefix": {
-        "description": "自定义提示词模式的前缀",
-        "hint": "用于触发自定义prompt，例如设置为 '画'，则使用 '画 <你的prompt>' 来调用",
+        "description": "自定义图生图提示词模式的前缀",
+        "hint": "用于自定义图生图prompt，例如设置为 '图生图'，则使用 '图生图 <你的prompt>' 来调用",
         "type": "string",
-        "default": "画"
+        "default": "图生图"
     },
     "use_proxy": {
         "description": "是否启用网络代理",

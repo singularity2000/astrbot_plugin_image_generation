@@ -22,10 +22,10 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 @register(
     "astrbot_plugin_image_generation",
-    "MoonShadow1976",
-    "通过第三方api进行图像生成的插件，支持图生图和文生图，可自定义预设指令。",
+    "Singularity2000",
+    "文生图、图生图，可自定义提示词模板，兼容 OpenAI v1/resposnes 端点",
     "2.0.0", 
-    "https://github.com/MoonShadow1976/astrbot_plugin_image_generation",
+    "https://github.com/singularity2000/astrbot_plugin_image_generation",
 )
 class FigurineProPlugin(Star):
     class ImageWorkflow:
@@ -208,26 +208,18 @@ class FigurineProPlugin(Star):
             if sender_id in self.conf.get("user_blacklist", []): return
             if group_id and group_id in self.conf.get("group_blacklist", []): return
             if self.conf.get("user_whitelist", []) and sender_id not in self.conf.get("user_whitelist", []): return
-            if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist",
-                                                                                                   []): return
-            user_count = self._get_user_count(sender_id)
-            group_count = self._get_group_count(group_id) if group_id else 0
-            user_limit_on = self.conf.get("enable_user_limit", True)
-            group_limit_on = self.conf.get("enable_group_limit", False) and group_id
-            has_group_count = not group_limit_on or group_count > 0
-            has_user_count = not user_limit_on or user_count > 0
-            if group_id:
-                if not has_group_count and not has_user_count:
-                    yield event.plain_result("❌ 本群次数与您的个人次数均已用尽。");
-                    return
-            elif not has_user_count:
-                yield event.plain_result("❌ 您的使用次数已用完。");
-                return
+            if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist", []): return
 
+            # 频率限制检查
             if error_msg := await self._check_and_update_rate_limit():
                 yield event.plain_result(error_msg)
                 return
-                
+            
+            # 新的原子化扣费检查
+            if deduction_error := await self._check_and_deduct_count(sender_id, group_id):
+                yield event.plain_result(deduction_error)
+                return
+
         if not self.iwf or not (img_bytes_list := await self.iwf.get_images(event)):
             if not is_bnn:
                 yield event.plain_result("请发送或引用一张图片。");
@@ -254,19 +246,15 @@ class FigurineProPlugin(Star):
         res = await self._call_api(images_to_process, user_prompt)
         elapsed = (datetime.now() - start_time).total_seconds()
         if isinstance(res, bytes):
-            if not is_master:
-                if self.conf.get("enable_group_limit", False) and group_id and self._get_group_count(group_id) > 0:
-                    await self._decrease_group_count(group_id)
-                elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) > 0:
-                    await self._decrease_user_count(sender_id)
+            # 扣费逻辑已前置，此处不再需要
             caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"预设: {display_cmd}"]
             if is_master:
-                caption_parts.append("剩余次数: ∞")
+                caption_parts.append("管理员剩余次数: ∞")
             else:
                 if self.conf.get("enable_user_limit", True): caption_parts.append(
-                    f"个人剩余: {self._get_user_count(sender_id)}")
+                    f"个人剩余次数: {self._get_user_count(sender_id)}")
                 if self.conf.get("enable_group_limit", False) and group_id: caption_parts.append(
-                    f"本群剩余: {self._get_group_count(group_id)}")
+                    f"本群剩余次数: {self._get_group_count(group_id)}")
             yield event.chain_result([Image.fromBytes(res), Plain(" | ".join(caption_parts))])
         else:
             yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}")
@@ -288,24 +276,16 @@ class FigurineProPlugin(Star):
             if sender_id in self.conf.get("user_blacklist", []): return
             if group_id and group_id in self.conf.get("group_blacklist", []): return
             if self.conf.get("user_whitelist", []) and sender_id not in self.conf.get("user_whitelist", []): return
-            if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist",
-                                                                                                   []): return
-            user_count = self._get_user_count(sender_id)
-            group_count = self._get_group_count(group_id) if group_id else 0
-            user_limit_on = self.conf.get("enable_user_limit", True)
-            group_limit_on = self.conf.get("enable_group_limit", False) and group_id
-            has_group_count = not group_limit_on or group_count > 0
-            has_user_count = not user_limit_on or user_count > 0
-            if group_id:
-                if not has_group_count and not has_user_count:
-                    yield event.plain_result("❌ 本群次数与您的个人次数均已用尽。");
-                    return
-            elif not has_user_count:
-                yield event.plain_result("❌ 您的使用次数已用完。");
-                return
+            if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist", []): return
 
+            # 频率限制检查
             if error_msg := await self._check_and_update_rate_limit():
                 yield event.plain_result(error_msg)
+                return
+
+            # 新的原子化扣费检查
+            if deduction_error := await self._check_and_deduct_count(sender_id, group_id):
+                yield event.plain_result(deduction_error)
                 return
 
         display_prompt = prompt[:20] + '...' if len(prompt) > 20 else prompt
@@ -317,13 +297,7 @@ class FigurineProPlugin(Star):
         elapsed = (datetime.now() - start_time).total_seconds()
 
         if isinstance(res, bytes):
-            if not is_master:
-                # 扣除次数
-                if self.conf.get("enable_group_limit", False) and group_id and self._get_group_count(group_id) > 0:
-                    await self._decrease_group_count(group_id)
-                elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) > 0:
-                    await self._decrease_user_count(sender_id)
-
+            # 扣费逻辑已前置，此处不再需要
             caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)"]
             if is_master:
                 caption_parts.append("剩余次数: ∞")
@@ -686,6 +660,38 @@ class FigurineProPlugin(Star):
             yield event.plain_result(f"✅ 已删除 Key: {removed_key[:8]}...")
         else:
             yield event.plain_result("格式错误，请使用 #画图删除key <序号|all>")
+
+    async def _check_and_deduct_count(self, user_id: str, group_id: Optional[str]) -> Optional[str]:
+        """原子化地检查并扣除次数。如果扣费成功，返回None。如果失败，返回错误信息字符串。"""
+        user_limit_on = self.conf.get("enable_user_limit", True)
+        group_limit_on = self.conf.get("enable_group_limit", False) and group_id
+
+        # 优先尝试从可用池中扣费
+        if group_limit_on and self._get_group_count(group_id) > 0:
+            await self._decrease_group_count(group_id)
+            return None  # 群组扣费成功
+
+        if user_limit_on and self._get_user_count(user_id) > 0:
+            await self._decrease_user_count(user_id)
+            return None  # 个人扣费成功
+
+        # 如果代码执行到这里，说明没有可用的次数进行扣费。
+        # 下一步是判断是否需要提示错误，或者因为未开启限制而直接放行。
+
+        # 如果两个限制都未开启，则免费放行
+        if not user_limit_on and not group_limit_on:
+            return None
+
+        # 如果至少一个限制开启了，但没能成功扣费，说明次数已用尽，返回相应错误信息
+        if user_limit_on and group_limit_on:
+            return "❌ 本群和您的个人次数均已用完，请等待次日重置或向管理员索要。"
+        elif user_limit_on:
+            return "❌ 您的个人使用次数已用完，请等待次日重置或向管理员索要。"
+        elif group_limit_on:
+            return "❌ 本群的使用次数已用完，请等待次日重置或向管理员索要。"
+        
+        # 理论上不会执行到这里，但作为保障
+        return None
 
     async def _check_and_update_rate_limit(self) -> Optional[str]:
         """Checks the rate limit. If not passed, returns an error string. If passed, updates the last call time and returns None."""
