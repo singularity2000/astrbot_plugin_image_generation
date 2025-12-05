@@ -1,6 +1,6 @@
 name: astrbot_plugin_image_generation
-desc: 适配图像生成模型，图片编辑，可自定义预设
+desc: 适配图像生成模型，图片编辑，可自定义预设，优化指令
 help: 通过第三方api进行图像生成的插件，支持图生图和文生图，可自定义预设指令
 version: v2.0.0
-author: MoonShadow1976
-repo: https://github.com/MoonShadow1976/astrbot_plugin_image_generation
+author: Singularity2000
+repo: https://github.com/singularity2000/astrbot_plugin_image_generation

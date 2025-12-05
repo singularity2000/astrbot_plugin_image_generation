@@ -130,11 +130,19 @@ class FigurineProPlugin(Star):
         self.user_counts: Dict[str, int] = {}
         self.group_counts_file = self.plugin_data_dir / "group_counts.json"
         self.group_counts: Dict[str, int] = {}
+
+        self.user_daily_counts_file = self.plugin_data_dir / "user_daily_counts.json"
+        self.user_daily_counts: Dict[str, Dict[str, Any]] = {}  # { "user_id": {"date": "YYYY-MM-DD", "count": N} }
+        self.group_daily_counts_file = self.plugin_data_dir / "group_daily_counts.json"
+        self.group_daily_counts: Dict[str, Dict[str, Any]] = {}  # { "group_id": {"date": "YYYY-MM-DD", "count": N} }
+
         self.user_checkin_file = self.plugin_data_dir / "user_checkin.json"
         self.user_checkin_data: Dict[str, str] = {}
         self.prompt_map: Dict[str, str] = {}
         self.key_index = 0
         self.key_lock = asyncio.Lock()
+        self.last_api_call_time: Optional[datetime] = None
+        self.api_call_lock = asyncio.Lock()
         self.iwf: Optional[FigurineProPlugin.ImageWorkflow] = None
 
         # 区别不同风格的响应格式
@@ -153,6 +161,8 @@ class FigurineProPlugin(Star):
         await self._load_prompt_map()
         await self._load_user_counts()
         await self._load_group_counts()
+        await self._load_user_daily_counts()
+        await self._load_group_daily_counts()
         await self._load_user_checkin_data()
         logger.info("FigurinePro 插件已加载 (lmarena 风格)")
         if not self.conf.get("api_keys"):
@@ -213,6 +223,11 @@ class FigurineProPlugin(Star):
             elif not has_user_count:
                 yield event.plain_result("❌ 您的使用次数已用完。");
                 return
+
+            if error_msg := await self._check_and_update_rate_limit():
+                yield event.plain_result(error_msg)
+                return
+                
         if not self.iwf or not (img_bytes_list := await self.iwf.get_images(event)):
             if not is_bnn:
                 yield event.plain_result("请发送或引用一张图片。");
@@ -289,6 +304,10 @@ class FigurineProPlugin(Star):
                 yield event.plain_result("❌ 您的使用次数已用完。");
                 return
 
+            if error_msg := await self._check_and_update_rate_limit():
+                yield event.plain_result(error_msg)
+                return
+
         display_prompt = prompt[:20] + '...' if len(prompt) > 20 else prompt
         yield event.plain_result(f"🎨 收到文生图请求，正在生成 [{display_prompt}]...")
 
@@ -340,7 +359,7 @@ class FigurineProPlugin(Star):
         await self._load_prompt_map()
         yield event.plain_result(f"已保存LM生图提示语:\n{key}:{new_value}")
 
-    @filter.command("lm帮助", aliases={"lmh", "手办化帮助"}, prefix_optional=True)
+    @filter.command("lm帮助", aliases={"lmh", "画图帮助"}, prefix_optional=True)
     async def on_prompt_help(self, event: AstrMessageEvent):
         keyword = event.message_str.strip()
         if not keyword:
@@ -383,41 +402,82 @@ class FigurineProPlugin(Star):
             logger.error(f"保存用户次数文件时发生错误: {e}", exc_info=True)
 
     def _get_user_count(self, user_id: str) -> int:
-        return self.user_counts.get(str(user_id), 0)
+        permanent_count = self.user_counts.get(str(user_id), 0)
+        
+        daily_fixed_quota = self.conf.get("user_daily_fixed_quota", 0)
+        if daily_fixed_quota <= 0:
+            return permanent_count
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        user_daily_data = self.user_daily_counts.get(str(user_id), {})
+        
+        used_today = 0
+        if user_daily_data.get("date") == today_str:
+            used_today = user_daily_data.get("count", 0)
+        
+        remaining_daily = max(0, daily_fixed_quota - used_today)
+        return permanent_count + remaining_daily
 
     async def _decrease_user_count(self, user_id: str):
         user_id_str = str(user_id)
-        count = self._get_user_count(user_id_str)
-        if count > 0: self.user_counts[user_id_str] = count - 1; await self._save_user_counts()
+        permanent_count = self.user_counts.get(user_id_str, 0)
 
-    async def _load_group_counts(self):
-        if not self.group_counts_file.exists(): self.group_counts = {}; return
-        loop = asyncio.get_running_loop()
-        try:
-            content = await loop.run_in_executor(None, self.group_counts_file.read_text, "utf-8")
-            data = await loop.run_in_executor(None, json.loads, content)
-            if isinstance(data, dict): self.group_counts = {str(k): v for k, v in data.items()}
-        except Exception as e:
-            logger.error(f"加载群组次数文件时发生错误: {e}", exc_info=True);
-            self.group_counts = {}
+        if permanent_count > 0:
+            self.user_counts[user_id_str] = permanent_count - 1
+            await self._save_user_counts()
+            return
 
-    async def _save_group_counts(self):
-        loop = asyncio.get_running_loop()
-        try:
-            json_data = await loop.run_in_executor(None,
-                                                   functools.partial(json.dumps, self.group_counts, ensure_ascii=False,
-                                                                     indent=4))
-            await loop.run_in_executor(None, self.group_counts_file.write_text, json_data, "utf-8")
-        except Exception as e:
-            logger.error(f"保存群组次数文件时发生错误: {e}", exc_info=True)
+        daily_fixed_quota = self.conf.get("user_daily_fixed_quota", 0)
+        if daily_fixed_quota > 0:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            user_daily_data = self.user_daily_counts.get(user_id_str, {})
+            
+            used_today = 0
+            if user_daily_data.get("date") == today_str:
+                used_today = user_daily_data.get("count", 0)
+
+            if used_today < daily_fixed_quota:
+                self.user_daily_counts[user_id_str] = {"date": today_str, "count": used_today + 1}
+                await self._save_user_daily_counts()
 
     def _get_group_count(self, group_id: str) -> int:
-        return self.group_counts.get(str(group_id), 0)
+        permanent_count = self.group_counts.get(str(group_id), 0)
+
+        daily_fixed_quota = self.conf.get("group_daily_fixed_quota", 0)
+        if daily_fixed_quota <= 0:
+            return permanent_count
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        group_daily_data = self.group_daily_counts.get(str(group_id), {})
+
+        used_today = 0
+        if group_daily_data.get("date") == today_str:
+            used_today = group_daily_data.get("count", 0)
+
+        remaining_daily = max(0, daily_fixed_quota - used_today)
+        return permanent_count + remaining_daily
 
     async def _decrease_group_count(self, group_id: str):
         group_id_str = str(group_id)
-        count = self._get_group_count(group_id_str)
-        if count > 0: self.group_counts[group_id_str] = count - 1; await self._save_group_counts()
+        permanent_count = self.group_counts.get(group_id_str, 0)
+
+        if permanent_count > 0:
+            self.group_counts[group_id_str] = permanent_count - 1
+            await self._save_group_counts()
+            return
+
+        daily_fixed_quota = self.conf.get("group_daily_fixed_quota", 0)
+        if daily_fixed_quota > 0:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            group_daily_data = self.group_daily_counts.get(group_id_str, {})
+
+            used_today = 0
+            if group_daily_data.get("date") == today_str:
+                used_today = group_daily_data.get("count", 0)
+
+            if used_today < daily_fixed_quota:
+                self.group_daily_counts[group_id_str] = {"date": today_str, "count": used_today + 1}
+                await self._save_group_daily_counts()
 
     async def _load_user_checkin_data(self):
         if not self.user_checkin_file.exists(): self.user_checkin_data = {}; return
@@ -439,7 +499,7 @@ class FigurineProPlugin(Star):
         except Exception as e:
             logger.error(f"保存用户签到文件时发生错误: {e}", exc_info=True)
 
-    @filter.command("手办化签到", prefix_optional=True)
+    @filter.command("画图签到", prefix_optional=True)
     async def on_checkin(self, event: AstrMessageEvent):
         if not self.conf.get("enable_checkin", False):
             yield event.plain_result("📅 本机器人未开启签到功能。")
@@ -449,21 +509,28 @@ class FigurineProPlugin(Star):
         if self.user_checkin_data.get(user_id) == today_str:
             yield event.plain_result(f"您今天已经签到过了。\n剩余次数: {self._get_user_count(user_id)}")
             return
+        
         reward = 0
         if str(self.conf.get("enable_random_checkin", False)).lower() == 'true':
             max_reward = max(1, int(self.conf.get("checkin_random_reward_max", 5)))
             reward = random.randint(1, max_reward)
         else:
             reward = int(self.conf.get("checkin_fixed_reward", 3))
-        current_count = self._get_user_count(user_id)
-        new_count = current_count + reward
-        self.user_counts[user_id] = new_count
+
+        # 签到奖励只增加永久次数
+        current_permanent_count = self.user_counts.get(user_id, 0)
+        new_permanent_count = current_permanent_count + reward
+        self.user_counts[user_id] = new_permanent_count
         await self._save_user_counts()
+
         self.user_checkin_data[user_id] = today_str
         await self._save_user_checkin_data()
-        yield event.plain_result(f"🎉 签到成功！获得 {reward} 次，当前剩余: {new_count} 次。")
 
-    @filter.command("手办化增加用户次数", prefix_optional=True)
+        # 回复时显示总次数
+        new_total_count = self._get_user_count(user_id)
+        yield event.plain_result(f"🎉 签到成功！获得 {reward} 次（永久），当前总剩余: {new_total_count} 次。")
+
+    @filter.command("画图增加用户次数", prefix_optional=True)
     async def on_add_user_counts(self, event: AstrMessageEvent):
         if not self.is_global_admin(event): return
         cmd_text = event.message_str.strip()
@@ -478,27 +545,39 @@ class FigurineProPlugin(Star):
             if match: target_qq, count = match.group(1), int(match.group(2))
         if not target_qq or count <= 0:
             yield event.plain_result(
-                '格式错误:\n#手办化增加用户次数 @用户 <次数>\n或 #手办化增加用户次数 <QQ号> <次数>')
+                '格式错误:\n#画图增加用户次数 @用户 <次数>\n或 #画图增加用户次数 <QQ号> <次数>')
             return
-        current_count = self._get_user_count(target_qq)
-        self.user_counts[str(target_qq)] = current_count + count
+            
+        # 管理员增加的是永久次数
+        current_permanent_count = self.user_counts.get(str(target_qq), 0)
+        new_permanent_count = current_permanent_count + count
+        self.user_counts[str(target_qq)] = new_permanent_count
         await self._save_user_counts()
-        yield event.plain_result(f"✅ 已为用户 {target_qq} 增加 {count} 次，TA当前剩余 {current_count + count} 次。")
 
-    @filter.command("手办化增加群组次数", prefix_optional=True)
+        # 回复时显示总次数
+        new_total_count = self._get_user_count(target_qq)
+        yield event.plain_result(f"✅ 已为用户 {target_qq} 增加 {count} 次（永久），TA当前总剩余 {new_total_count} 次。")
+
+    @filter.command("画图增加群组次数", prefix_optional=True)
     async def on_add_group_counts(self, event: AstrMessageEvent):
         if not self.is_global_admin(event): return
         match = re.search(r"(\d+)\s+(\d+)", event.message_str.strip())
         if not match:
-            yield event.plain_result('格式错误: #手办化增加群组次数 <群号> <次数>')
+            yield event.plain_result('格式错误: #画图增加群组次数 <群号> <次数>')
             return
         target_group, count = match.group(1), int(match.group(2))
-        current_count = self._get_group_count(target_group)
-        self.group_counts[str(target_group)] = current_count + count
+        
+        # 管理员增加的是永久次数
+        current_permanent_count = self.group_counts.get(str(target_group), 0)
+        new_permanent_count = current_permanent_count + count
+        self.group_counts[str(target_group)] = new_permanent_count
         await self._save_group_counts()
-        yield event.plain_result(f"✅ 已为群组 {target_group} 增加 {count} 次，该群当前剩余 {current_count + count} 次。")
 
-    @filter.command("手办化查询次数", prefix_optional=True)
+        # 回复时显示总次数
+        new_total_count = self._get_group_count(target_group)
+        yield event.plain_result(f"✅ 已为群组 {target_group} 增加 {count} 次（永久），该群当前总剩余 {new_total_count} 次。")
+
+    @filter.command("画图查询次数", prefix_optional=True)
     async def on_query_counts(self, event: AstrMessageEvent):
         user_id_to_query = event.get_sender_id()
         if self.is_global_admin(event):
@@ -514,7 +593,7 @@ class FigurineProPlugin(Star):
         if group_id := event.get_group_id(): reply_msg += f"\n本群共享剩余次数为: {self._get_group_count(group_id)}"
         yield event.plain_result(reply_msg)
 
-    @filter.command("手办化添加key", prefix_optional=True)
+    @filter.command("画图添加key", prefix_optional=True)
     async def on_add_key(self, event: AstrMessageEvent):
         if not self.is_global_admin(event): return
         new_keys = event.message_str.strip().split()
@@ -525,7 +604,7 @@ class FigurineProPlugin(Star):
         await self.conf.set("api_keys", api_keys)
         yield event.plain_result(f"✅ 操作完成，新增 {len(added_keys)} 个Key，当前共 {len(api_keys)} 个。")
 
-    @filter.command("手办化key列表", prefix_optional=True)
+    @filter.command("画图key列表", prefix_optional=True)
     async def on_list_keys(self, event: AstrMessageEvent):
         if not self.is_global_admin(event): return
         api_keys = self.conf.get("api_keys", [])
@@ -533,7 +612,7 @@ class FigurineProPlugin(Star):
         key_list_str = "\n".join(f"{i + 1}. {key[:8]}...{key[-4:]}" for i, key in enumerate(api_keys))
         yield event.plain_result(f"🔑 API Key 列表:\n{key_list_str}")
 
-    @filter.command("手办化删除key", prefix_optional=True)
+    @filter.command("画图删除key", prefix_optional=True)
     async def on_delete_key(self, event: AstrMessageEvent):
         if not self.is_global_admin(event): return
         param = event.message_str.strip()
@@ -546,7 +625,23 @@ class FigurineProPlugin(Star):
             await self.conf.set("api_keys", api_keys)
             yield event.plain_result(f"✅ 已删除 Key: {removed_key[:8]}...")
         else:
-            yield event.plain_result("格式错误，请使用 #手办化删除key <序号|all>")
+            yield event.plain_result("格式错误，请使用 #画图删除key <序号|all>")
+
+    async def _check_and_update_rate_limit(self) -> Optional[str]:
+        """Checks the rate limit. If not passed, returns an error string. If passed, updates the last call time and returns None."""
+        rate_limit = self.conf.get("rate_limit_seconds", 120)
+        if rate_limit <= 0:
+            return None
+
+        async with self.api_call_lock:
+            now = datetime.now()
+            if self.last_api_call_time:
+                elapsed = (now - self.last_api_call_time).total_seconds()
+                if elapsed < rate_limit:
+                    return f"⏳ 操作太频繁或其他用户正在生图，请在 {int(rate_limit - elapsed)} 秒后再试。"
+            # The check passed, update the time
+            self.last_api_call_time = now
+        return None
 
     async def _get_api_key(self) -> str | None:
         keys = self.conf.get("api_keys", [])

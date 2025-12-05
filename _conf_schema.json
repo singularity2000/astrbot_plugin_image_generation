@@ -24,7 +24,7 @@
     "api_keys": {
         "description": "API 密钥列表",
         "type": "list",
-        "hint": "可以填写多个密钥，插件会自动轮换使用。使用 #lm 添加key 命令进行管理。",
+        "hint": "可以填写多个密钥，插件会自动轮换使用。使用 #画图添加key 命令进行管理。",
         "items": {
             "type": "string",
             "description": "API 密钥"
@@ -86,19 +86,37 @@
     "enable_user_limit": {
         "description": "【次数限制】是否启用【用户】次数限制",
         "type": "bool",
-        "hint": "开启后，将根据用户的QQ号独立计算和限制使用次数。",
+        "hint": "开启后，将限制用户的总使用次数。总次数 = 永久次数 + 每日固定额度。",
         "default": true
     },
     "enable_group_limit": {
         "description": "【次数限制】是否启用【群组】次数限制",
         "type": "bool",
-        "hint": "开启后，将根据群号计算和限制群内总的使用次数。",
+        "hint": "开启后，将限制群内的总使用次数。总次数 = 永久次数 + 每日固定额度。",
         "default": false
+    },
+    "user_daily_fixed_quota": {
+        "description": "【次数限制】每用户每日固定额度",
+        "type": "int",
+        "hint": "每天0点重置的固定额度，与永久额度(签到、管理员给予)叠加。默认为0，即不启用。",
+        "default": 0
+    },
+    "group_daily_fixed_quota": {
+        "description": "【次数限制】每群组每日固定额度",
+        "type": "int",
+        "hint": "每天0点重置的固定额度，与永久额度(签到、管理员给予)叠加。默认为0，即不启用。",
+        "default": 0
+    },
+    "rate_limit_seconds": {
+        "description": "【频率限制】全局调用间隔（秒）",
+        "type": "int",
+        "hint": "两次生图请求之间的最小全局冷却时间，单位为秒。管理员不受此限制。默认为120秒。",
+        "default": 120
     },
     "enable_checkin": {
         "description": "【签到系统】是否开启每日签到功能",
         "type": "bool",
-        "hint": "开启后，用户可使用 #lm签到 命令获取个人次数。",
+        "hint": "开启后，用户可使用 #画图签到 命令获取个人次数。",
         "default": false
     },
     "checkin_fixed_reward": {
