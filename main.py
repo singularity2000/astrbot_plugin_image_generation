@@ -664,51 +664,160 @@ class FigurineProPlugin(Star):
             logger.warning(f"未能在响应中找到 '{self.data_form}[0].url'，原始响应 (截断): {str(data)[:200]}")
             return None
 
+    def _sanitize_for_log(self, data: Any) -> Any:
+        if isinstance(data, dict):
+            return {k: self._sanitize_for_log(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._sanitize_for_log(item) for item in data]
+        elif isinstance(data, str) and len(data) > 200:
+            return data[:200] + "..."
+        else:
+            return data
+
+    async def _call_openai_responses_api(self, image_bytes_list: List[bytes], prompt: str) -> bytes | str:
+        api_url = self.conf.get("api_url")
+        if not api_url: return "API URL 未配置"
+        api_key = await self._get_api_key()
+        if not api_key: return "无可用的 API Key"
+        
+        model_name = self.conf.get("model")
+        if not model_name: return "模型名称 (model) 未配置"
+
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        
+        # This structure is based on the provided ttp.py for Gemini-FastAPI
+        content_items = [{"type": "input_text", "text": prompt}]
+        if image_bytes_list:
+            for img_bytes in image_bytes_list:
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                content_items.append({"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"})
+        
+        payload = {
+            "model": model_name,
+            "input": [{"role": "user", "content": content_items}],
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": {"type": "image_generation"},
+        }
+        
+        logger.info(f"发送到 OpenAI-responses API: URL={api_url}, Model={model_name}, HasImage={bool(image_bytes_list)}")
+        # Use the sanitize helper for logging the payload
+        logger.debug(f"Payload (sanitized): {json.dumps(self._sanitize_for_log(payload), ensure_ascii=False)}")
+
+        try:
+            if not self.iwf: return "ImageWorkflow 未初始化"
+            timeout = aiohttp.ClientTimeout(total=180)
+            async with self.iwf.session.post(api_url, json=payload, headers=headers, proxy=self.iwf.proxy, timeout=timeout) as resp:
+                try:
+                    data = await resp.json()
+                    # Use the sanitize helper for logging the response
+                    sanitized_data = self._sanitize_for_log(data)
+                    logger.info(f"完整API响应 (sanitized): {json.dumps(sanitized_data, indent=2, ensure_ascii=False)}")
+                except Exception as e:
+                    raw_text = await resp.text()
+                    logger.error(f"解析API响应JSON失败: {e}")
+                    logger.info(f"原始响应文本: {raw_text[:500]}...")
+                    return f"API响应解析失败: {raw_text[:200]}"
+
+                if resp.status != 200:
+                    error_message = data.get("error", {}).get("message", str(data))
+                    logger.error(f"API 请求失败: HTTP {resp.status}, 响应: {error_message}")
+                    return f"API请求失败 (HTTP {resp.status}): {error_message[:200]}"
+
+                base64_string = None
+                
+                # Parsing logic from ttp.py
+                if data.get("object") == "response" and "output" in data:
+                    output_list = data.get("output", [])
+                    if isinstance(output_list, list):
+                        for item in output_list:
+                            if isinstance(item, dict) and item.get("type") == "image_generation_call":
+                                result = item.get("result")
+                                if isinstance(result, str) and result:
+                                    base64_string = result
+                                    logger.info("在响应 `output` 字段中找到 Base64 图像数据 (image_generation_call)")
+                                    break
+                
+                if not base64_string:
+                    response_data = data.get("data", [])
+                    if isinstance(response_data, list):
+                        for item in response_data:
+                            if isinstance(item, dict) and item.get("type") == "image_result":
+                                b64_json = item.get("b64_json")
+                                if isinstance(b64_json, str) and b64_json:
+                                    base64_string = b64_json
+                                    logger.info("在响应 `data` 字段中找到 Base64 图像数据 (b64_json)")
+                                    break
+                
+                if not base64_string:
+                    choices = data.get("choices", [])
+                    if choices:
+                        message = choices[0].get("message", {})
+                        content_list = message.get("content", [])
+                        if isinstance(content_list, list):
+                            for item in content_list:
+                                if isinstance(item, dict) and item.get("type") == "image_result":
+                                    base64_data = item.get("image")
+                                    if isinstance(base64_data, str) and base64_data:
+                                        base64_string = base64_data
+                                        logger.info("在响应 `choices` 中找到 Base64 图像数据")
+                                        break
+                
+                if not base64_string:
+                    error_msg = f"API响应中未找到有效的图像数据"
+                    logger.error(f"{error_msg}. Response: {self._sanitize_for_log(data)}")
+                    return error_msg
+
+                # Remove potential data URI prefix
+                if "base64," in base64_string:
+                    base64_string = base64_string.split("base64,", 1)[1]
+                
+                return base64.b64decode(base64_string)
+
+        except asyncio.TimeoutError:
+            logger.error("API 请求超时");
+            return "请求超时"
+        except Exception as e:
+            logger.error(f"调用 OpenAI-responses API 时发生未知错误: {e}", exc_info=True);
+            return f"发生未知错误: {e}"
+
     async def _call_api(self, image_bytes_list: List[bytes], prompt: str) -> bytes | str:
+        api_from = self.conf.get("api_from")
+
+        if api_from == "OpenAI-responses":
+            return await self._call_openai_responses_api(image_bytes_list, prompt)
+
+        # Existing logic for other API types
         api_url = self.conf.get("api_url")
         if not api_url: return "API URL 未配置"
         api_key = await self._get_api_key()
         if not api_key: return "无可用的 API Key"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
 
-        # --- 从配置读取模型名称 ---
-        model_name = self.conf.get("model")  # "model" 是必须的，从配置中读取
+        model_name = self.conf.get("model")
         if not model_name:
             return "模型名称 (model) 未配置"
 
-        # --- 构建 API payload ---
         payload: Dict[str, Any] = {
             "model": model_name,
             "prompt": prompt,
-            # "response_format": "url" # 默认为 url，URL 1小时有效
-            # 根据文档，可以添加 image_size, negative_prompt 等
-            # 但为保持插件简洁性，暂不从 conf_schema 添加，依赖模型默认值
         }
 
-        # --- 添加图片 (图生图 / 多图) ---
         if image_bytes_list:
-            # 这是图生图 (或多图)
             try:
                 img_b64 = base64.b64encode(image_bytes_list[0]).decode("utf-8")
                 payload["image"] = f"data:image/png;base64,{img_b64}"
-
-                # (可选) 支持 SiliconFlow 的多图输入 (最多3张)
-                # 插件的 bnn 命令最多支持5张，但 SiliconFlow 常见模型支持到 image3
                 if len(image_bytes_list) > 1:
                     img_b64_2 = base64.b64encode(image_bytes_list[1]).decode("utf-8")
                     payload["image2"] = f"data:image/png;base64,{img_b64_2}"
-
                 if len(image_bytes_list) > 2:
                     img_b64_3 = base64.b64encode(image_bytes_list[2]).decode("utf-8")
                     payload["image3"] = f"data:image/png;base64,{img_b64_3}"
             except Exception as e:
                 logger.error(f"Base64 编码图片时出错: {e}", exc_info=True)
                 return f"图片编码失败: {e}"
-        # else:
-        # 这是文生图，payload 保持原样 (model + prompt)
 
-        logger.info(f"发送到 {self.conf.get('api_from')} API: URL={api_url}, Model={model_name}, HasImage={bool(image_bytes_list)}")
-
+        logger.info(f"发送到 {api_from} API: URL={api_url}, Model={model_name}, HasImage={bool(image_bytes_list)}")
+        
         try:
             if not self.iwf: return "ImageWorkflow 未初始化"
             async with self.iwf.session.post(api_url, json=payload, headers=headers, proxy=self.iwf.proxy,
@@ -719,6 +828,9 @@ class FigurineProPlugin(Star):
                     return f"API请求失败 (HTTP {resp.status}): {error_text[:200]}"
 
                 data = await resp.json()
+                
+                # Dynamically update data_form based on current config
+                self.data_form = self.form.get(api_from, "images")
 
                 if self.data_form not in data or not data[self.data_form]:
                     error_msg = f"API响应中未找到图片数据: {str(data)[:500]}..."
@@ -738,7 +850,6 @@ class FigurineProPlugin(Star):
                     b64_data = gen_image_url.split(",", 1)[1]
                     return base64.b64decode(b64_data)
                 else:
-                    # 返回的是 URL，需要下载
                     return await self.iwf._download_image(gen_image_url) or "下载生成的图片失败"
         except asyncio.TimeoutError:
             logger.error("API 请求超时");
