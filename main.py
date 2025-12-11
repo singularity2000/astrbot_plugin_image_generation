@@ -740,6 +740,98 @@ class FigurineProPlugin(Star):
         else:
             return data
 
+    async def _call_flow2api_api(self, image_bytes_list: List[bytes], prompt: str) -> bytes | str:
+        api_url = self.conf.get("api_url")
+        if not api_url: return "API URL 未配置"
+        api_key = await self._get_api_key()
+        if not api_key: return "无可用的 API Key"
+        
+        model_name = self.conf.get("model")
+        if not model_name: return "模型名称 (model) 未配置"
+
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        
+        content = [{"type": "text", "text": prompt}]
+        if image_bytes_list:
+            for img_bytes in image_bytes_list:
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{img_b64}",
+                        "detail": "high"
+                    }
+                })
+        
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": content}],
+            "stream": True,
+        }
+        
+        logger.info(f"发送到 Flow2API: URL={api_url}, Model={model_name}, HasImage={bool(image_bytes_list)}")
+        logger.debug(f"Payload (sanitized): {json.dumps(self._sanitize_for_log(payload), ensure_ascii=False)}")
+
+        try:
+            if not self.iwf: return "ImageWorkflow 未初始化"
+            timeout = aiohttp.ClientTimeout(total=180)
+            async with self.iwf.session.post(api_url, json=payload, headers=headers, proxy=self.iwf.proxy, timeout=timeout) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"API 请求失败: HTTP {resp.status}, 响应: {error_text}")
+                    return f"API请求失败 (HTTP {resp.status}): {error_text[:200]}"
+
+                response_text = await resp.text()
+                
+                full_content = ""
+                lines = response_text.strip().split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line.startswith("data: ") and line != "data: [DONE]":
+                        try:
+                            chunk = json.loads(line[6:])
+                            if chunk and "choices" in chunk and chunk["choices"]:
+                                delta = chunk["choices"][0].get("delta", {})
+                                content_text = delta.get("content", "")
+                                if content_text: full_content += content_text
+                        except:
+                            pass
+                
+                gen_image_url = None
+                url_patterns = [r'!\[.*?\]\((https?://[^\s)]+)\)', r'\((https?://[^\s)]+)\)', r'(https?://[^\s<>"]+)']
+                for pattern in url_patterns:
+                    urls = re.findall(pattern, full_content, re.IGNORECASE)
+                    if urls:
+                        gen_image_url = urls[0]
+                        logger.info(f"✅ 生成成功: {gen_image_url[:50]}...")
+                        break
+
+                if not gen_image_url and "http" in full_content.lower():
+                    words = re.split(r'[\s\n\r\t,.;:!?()\[\]{}]+', full_content)
+                    for word in words:
+                        if word.lower().startswith(('http://', 'https://')):
+                            gen_image_url = re.sub(r'[.,;:!?)\]]+$', '', word)
+                            break
+                
+                if not gen_image_url:
+                    error_msg = f"API响应中未找到有效的图像URL"
+                    logger.error(f"{error_msg}. Response: {full_content[:500]}")
+                    return error_msg
+                
+                if gen_image_url.startswith("data:image/"):
+                    b64_data = gen_image_url.split(",", 1)[1]
+                    return base64.b64decode(b64_data)
+                else:
+                    return await self.iwf._download_image(gen_image_url) or "下载生成的图片失败"
+
+
+        except asyncio.TimeoutError:
+            logger.error("API 请求超时");
+            return "请求超时"
+        except Exception as e:
+            logger.error(f"调用 Flow2API 时发生未知错误: {e}", exc_info=True);
+            return f"发生未知错误: {e}"
+
     async def _call_openai_responses_api(self, image_bytes_list: List[bytes], prompt: str) -> bytes | str:
         api_url = self.conf.get("api_url")
         if not api_url: return "API URL 未配置"
@@ -851,6 +943,9 @@ class FigurineProPlugin(Star):
 
         if api_from == "OpenAI-responses":
             return await self._call_openai_responses_api(image_bytes_list, prompt)
+        
+        if api_from == "Flow2API":
+            return await self._call_flow2api_api(image_bytes_list, prompt)
 
         # Existing logic for other API types
         api_url = self.conf.get("api_url")

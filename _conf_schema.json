@@ -7,19 +7,20 @@
         "options": [
           "siliconflow",
           "bigmodel",
-          "OpenAI-responses"
+          "OpenAI-responses",
+          "Flow2API"
         ]
     },        
     "api_url": {
         "description": "【通用】API的URL地址",
         "type": "string",
-        "hint": "图生图和文生图功能均使用此URL。硅基流动默认为 https://api.siliconflow.cn/v1/images/generations 智谱默认为 https://open.bigmodel.cn/api/paas/v4/images/generations OpenAI-responses请填 http://localhost:8000/v1/responses",
+        "hint": "硅基流动默认为 https://api.siliconflow.cn/v1/images/generations 智谱默认为 https://open.bigmodel.cn/api/paas/v4/images/generations OpenAI-responses请填 http://localhost:8000/v1/responses Flow2API请填 http://localhost:8081/v1/chat/completions",
         "default": "http://localhost:8000/v1/responses"
     },
     "model": {
         "description": "【通用】默认模型名称",
         "type": "string",
-        "hint": "图生图和文生图功能均使用此模型。",
+        "hint": "OpenAI-responses默认为gemini-3.0-pro；Flow2API默认为gemini-3.0-pro-image-landscape (或portrait)",
         "default": "gemini-3.0-pro"
     },
     "api_keys": {
