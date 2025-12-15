@@ -29,22 +29,24 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 )
 class FigurineProPlugin(Star):
     class ImageWorkflow:
-        def __init__(self, proxy_url: str | None = None):
+        def __init__(self, config: AstrBotConfig, proxy_url: str | None = None):
             if proxy_url: logger.info(f"ImageWorkflow 使用代理: {proxy_url}")
+            self.conf = config
             self.session = aiohttp.ClientSession()
             self.proxy = proxy_url
 
         async def _download_image(self, url: str) -> bytes | None:
             logger.info(f"正在尝试下载图片: {url}")
+            download_timeout = self.conf.get("download_timeout", 30)
             try:
-                async with self.session.get(url, proxy=self.proxy, timeout=30) as resp:
+                async with self.session.get(url, proxy=self.proxy, timeout=download_timeout) as resp:
                     resp.raise_for_status()
                     return await resp.read()
             except aiohttp.ClientResponseError as e:
                 logger.error(f"图片下载失败: HTTP状态码 {e.status}, URL: {url}, 原因: {e.message}")
                 return None
             except asyncio.TimeoutError:
-                logger.error(f"图片下载失败: 请求超时 (30s), URL: {url}")
+                logger.error(f"图片下载失败: 请求超时 ({download_timeout}s), URL: {url}")
                 return None
             except Exception as e:
                 logger.error(f"图片下载失败: 发生未知错误, URL: {url}, 错误类型: {type(e).__name__}, 错误: {e}",
@@ -157,7 +159,7 @@ class FigurineProPlugin(Star):
     async def initialize(self):
         use_proxy = self.conf.get("use_proxy", False)
         proxy_url = self.conf.get("proxy_url") if use_proxy else None
-        self.iwf = self.ImageWorkflow(proxy_url)
+        self.iwf = self.ImageWorkflow(self.conf, proxy_url)
         await self._load_prompt_map()
         await self._load_user_counts()
         await self._load_group_counts()
@@ -774,7 +776,7 @@ class FigurineProPlugin(Star):
 
         try:
             if not self.iwf: return "ImageWorkflow 未初始化"
-            timeout = aiohttp.ClientTimeout(total=180)
+            timeout = aiohttp.ClientTimeout(total=self.conf.get("api_timeout", 180))
             async with self.iwf.session.post(api_url, json=payload, headers=headers, proxy=self.iwf.proxy, timeout=timeout) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -863,7 +865,7 @@ class FigurineProPlugin(Star):
 
         try:
             if not self.iwf: return "ImageWorkflow 未初始化"
-            timeout = aiohttp.ClientTimeout(total=180)
+            timeout = aiohttp.ClientTimeout(total=self.conf.get("api_timeout", 180))
             async with self.iwf.session.post(api_url, json=payload, headers=headers, proxy=self.iwf.proxy, timeout=timeout) as resp:
                 try:
                     data = await resp.json()
@@ -982,7 +984,7 @@ class FigurineProPlugin(Star):
         try:
             if not self.iwf: return "ImageWorkflow 未初始化"
             async with self.iwf.session.post(api_url, json=payload, headers=headers, proxy=self.iwf.proxy,
-                                             timeout=120) as resp:
+                                             timeout=self.conf.get("api_timeout", 180)) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
                     logger.error(f"API 请求失败: HTTP {resp.status}, 响应: {error_text}")

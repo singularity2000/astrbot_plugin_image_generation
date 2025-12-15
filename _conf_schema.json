@@ -57,6 +57,18 @@
         "hint": "格式为 http://user:pass@host:port, 例如 http://127.0.0.1:7890",
         "default": ""
     },
+    "api_timeout": {
+        "description": "API请求超时(秒)",
+        "type": "int",
+        "hint": "调用文生图/图生图API的超时时间（秒）。",
+        "default": 180
+    },
+    "download_timeout": {
+        "description": "图片传输超时(秒)",
+        "type": "int",
+        "hint": "下载用户发送的图片或下载生成结果时的超时时间（秒）。",
+        "default": 30
+    },
     "user_whitelist": {
         "description": "【权限】用户白名单",
         "type": "list",
