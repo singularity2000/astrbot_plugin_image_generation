@@ -13,6 +13,7 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from .persistence import PersistenceManager
 from .workflow import ImageWorkflow
 from .api_client import ImageGenAPI
+from .tools.image_gen import ImageGenTool
 
 @register(
     "astrbot_plugin_image_generation",
@@ -37,6 +38,7 @@ class FigurineProPlugin(Star):
         self.api_client = ImageGenAPI(self.conf, self.iwf)
         await self.persistence.load_all()
         await self._load_prompt_map()
+        self.context.add_llm_tools(ImageGenTool(self))
         logger.info("FigurinePro 插件已加载 (lmarena 风格)")
 
     async def _load_prompt_map(self):
@@ -63,72 +65,18 @@ class FigurineProPlugin(Star):
         cmd = text.split()[0].strip()
         bnn_command = self.conf.get("extra_prefix", "图生图")
         user_prompt = ""
-        is_bnn = False
         if cmd == bnn_command:
             user_prompt = text.removeprefix(cmd).strip()
-            is_bnn = True
             if not user_prompt: return
+            display_cmd = user_prompt[:10] + '...' if len(user_prompt) > 10 else user_prompt
         elif cmd in self.prompt_map:
             user_prompt = self.prompt_map.get(cmd)
+            display_cmd = cmd
         else:
             return
-        sender_id = event.get_sender_id()
-        group_id = event.get_group_id()
-        is_master = self.is_global_admin(event)
-        if not is_master:
-            if sender_id in self.conf.get("user_blacklist", []): return
-            if group_id and group_id in self.conf.get("group_blacklist", []): return
-            if self.conf.get("user_whitelist", []) and sender_id not in self.conf.get("user_whitelist", []): return
-            if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist", []): return
 
-            # 频率限制检查
-            if error_msg := await self.api_client.check_rate_limit():
-                yield event.plain_result(error_msg)
-                return
-            
-            # 新的原子化扣费检查
-            if deduction_error := await self.persistence.check_and_deduct_count(sender_id, group_id):
-                yield event.plain_result(deduction_error)
-                return
-
-        if not self.iwf or not (img_bytes_list := await self.iwf.get_images(event)):
-            if not is_bnn:
-                yield event.plain_result("请发送或引用一张图片。");
-                return
-        images_to_process = []
-        display_cmd = cmd
-        if is_bnn:
-            MAX_IMAGES = 5
-            original_count = len(img_bytes_list)
-            if original_count > MAX_IMAGES:
-                images_to_process = img_bytes_list[:MAX_IMAGES]
-                yield event.plain_result(f"🎨 检测到 {original_count} 张图片，已选取前 {MAX_IMAGES} 张…")
-            else:
-                images_to_process = img_bytes_list
-            display_cmd = user_prompt[:10] + '...' if len(user_prompt) > 10 else user_prompt
-            yield event.plain_result(f"🎨 检测到 {len(images_to_process)} 张图片，正在生成 [{display_cmd}]...")
-        else:
-            if not img_bytes_list:
-                yield event.plain_result("请发送或引用一张图片。");
-                return
-            images_to_process = [img_bytes_list[0]]
-            yield event.plain_result(f"🎨 收到请求，正在生成 [{cmd}]...")
-        start_time = datetime.now()
-        res = await self.api_client.call_api(images_to_process, user_prompt)
-        elapsed = (datetime.now() - start_time).total_seconds()
-        if isinstance(res, bytes):
-            # 扣费逻辑已前置，此处不再需要
-            caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"预设: {display_cmd}"]
-            if is_master:
-                caption_parts.append("管理员剩余次数: ∞")
-            else:
-                if self.conf.get("enable_user_limit", True): caption_parts.append(
-                    f"个人剩余次数: {self.persistence.get_user_count(sender_id)}")
-                if self.conf.get("enable_group_limit", False) and group_id: caption_parts.append(
-                    f"本群剩余次数: {self.persistence.get_group_count(group_id)}")
-            yield event.chain_result([Image.fromBytes(res), Plain(" | ".join(caption_parts))])
-        else:
-            yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}")
+        async for res in self.handle_image_gen_logic(event, user_prompt, is_i2i=True, display_name=display_cmd):
+            yield res
         event.stop_event()
 
     @filter.command("文生图", prefix_optional=True)
@@ -137,7 +85,12 @@ class FigurineProPlugin(Star):
         if not prompt:
             yield event.plain_result("请提供文生图的描述。用法: #文生图 <描述>")
             return
+        
+        async for res in self.handle_image_gen_logic(event, prompt, is_i2i=False):
+            yield res
+        event.stop_event()
 
+    async def handle_image_gen_logic(self, event: AstrMessageEvent, prompt: str, is_i2i: bool, display_name: str = None):
         sender_id = event.get_sender_id()
         group_id = event.get_group_id()
         is_master = self.is_global_admin(event)
@@ -154,33 +107,53 @@ class FigurineProPlugin(Star):
                 yield event.plain_result(error_msg)
                 return
 
-            # 新的原子化扣费检查
+            # 原子化扣费检查
             if deduction_error := await self.persistence.check_and_deduct_count(sender_id, group_id):
                 yield event.plain_result(deduction_error)
                 return
 
-        display_prompt = prompt[:20] + '...' if len(prompt) > 20 else prompt
-        yield event.plain_result(f"🎨 收到文生图请求，正在生成 [{display_prompt}]...")
+        # --- 图片获取 (仅图生图) ---
+        images_to_process = []
+        if is_i2i:
+            if not self.iwf or not (img_bytes_list := await self.iwf.get_images(event)):
+                yield event.plain_result("请发送或引用一张图片。")
+                return
+            
+            MAX_IMAGES = 5
+            original_count = len(img_bytes_list)
+            if original_count > MAX_IMAGES:
+                images_to_process = img_bytes_list[:MAX_IMAGES]
+                yield event.plain_result(f"🎨 检测到 {original_count} 张图片，已选取前 {MAX_IMAGES} 张…")
+            else:
+                images_to_process = img_bytes_list
+        
+        # --- 提示语显示 ---
+        if not display_name:
+            display_name = prompt[:20] + '...' if len(prompt) > 20 else prompt
+        
+        yield event.plain_result(f"🎨 收到{'图生图' if is_i2i else '文生图'}请求，正在生成 [{display_name}]...")
 
+        # --- API 调用 ---
         start_time = datetime.now()
-        # 调用通用API，但传入空的图片列表
-        res = await self.api_client.call_api([], prompt)
+        res = await self.api_client.call_api(images_to_process, prompt)
         elapsed = (datetime.now() - start_time).total_seconds()
 
         if isinstance(res, bytes):
-            # 扣费逻辑已前置，此处不再需要
             caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)"]
+            if is_i2i:
+                caption_parts.append(f"预设: {display_name}")
+            
             if is_master:
-                caption_parts.append("剩余次数: ∞")
+                caption_parts.append("管理员剩余次数: ∞")
             else:
-                if self.conf.get("enable_user_limit", True): caption_parts.append(
-                    f"个人剩余: {self.persistence.get_user_count(sender_id)}")
-                if self.conf.get("enable_group_limit", False) and group_id: caption_parts.append(
-                    f"本群剩余: {self.persistence.get_group_count(group_id)}")
+                if self.conf.get("enable_user_limit", True): 
+                    caption_parts.append(f"个人剩余: {self.persistence.get_user_count(sender_id)}")
+                if self.conf.get("enable_group_limit", False) and group_id: 
+                    caption_parts.append(f"本群剩余: {self.persistence.get_group_count(group_id)}")
+            
             yield event.chain_result([Image.fromBytes(res), Plain(" | ".join(caption_parts))])
         else:
             yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}")
-        event.stop_event()
 
     @filter.command("画图添加模板", aliases={"lma", "lm添加"}, prefix_optional=True)
     async def add_lm_prompt(self, event: AstrMessageEvent):
