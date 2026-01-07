@@ -1,19 +1,67 @@
+import asyncio
 import random
 import re
 from datetime import datetime
 from typing import Dict, Optional
+from dataclasses import dataclass, field
 
 from astrbot import logger
+from astrbot.api import FunctionTool
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
-from astrbot.core.message.components import At, Image, Plain
+from astrbot.core.message.components import At, Image, Plain, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .persistence import PersistenceManager
 from .workflow import ImageWorkflow
 from .api_client import ImageGenAPI
-from .tools.image_gen import ImageGenTool
+
+@dataclass
+class ImageGenTool(FunctionTool):
+    name: str = "image_generation"
+    description: str = ""
+    parameters: dict = field(default_factory=lambda: {
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "The detailed prompt for image generation. Expand the user's request into a professional prompt including style, lighting, and details.",
+            }
+        },
+        "required": ["prompt"],
+    })
+    source: str = "plugin"
+    source_name: str = "astrbot_plugin_image_generation"
+    plugin: object = field(default=None, repr=False)
+
+    async def run(self, event: AstrMessageEvent, prompt: str):
+        # 检测是否包含图片组件（直接发送或引用）
+        has_direct_image = False
+        for seg in event.message_obj.message:
+            if isinstance(seg, Image):
+                has_direct_image = True
+                break
+            if isinstance(seg, Reply) and seg.chain:
+                if any(isinstance(s, Image) for s in seg.chain):
+                    has_direct_image = True
+                    break
+        
+        # 智能决策：有图则图生图，无图则文生图
+        is_i2i = has_direct_image
+
+        # 1. 异步启动后台任务，避免阻塞 LLM 导致超时
+        asyncio.create_task(self._run_background_gen(event, prompt, is_i2i))
+        
+        # 2. 停止事件传播，阻止 LLM 继续生成回复
+        event.stop_event()
+
+    async def _run_background_gen(self, event: AstrMessageEvent, prompt: str, is_i2i: bool):
+        try:
+            async for result in self.plugin.handle_image_gen_logic(event, prompt, is_i2i=is_i2i):
+                await event.send(result)
+        except Exception as e:
+            logger.error(f"Background image generation failed: {e}")
 
 @register(
     "astrbot_plugin_image_generation",
@@ -38,7 +86,10 @@ class FigurineProPlugin(Star):
         self.api_client = ImageGenAPI(self.conf, self.iwf)
         await self.persistence.load_all()
         await self._load_prompt_map()
-        self.context.add_llm_tools(ImageGenTool(self))
+        self.context.add_llm_tools(ImageGenTool(
+            plugin=self,
+            description=self.conf.get("llm_tool_description", "这是一个高级图片生成工具。主要功能为文生图、图生图。理解用户意图，仅当用户需要你画图，或修改图片内容时，才调用此工具，并智能决定调用文生图还是图生图。你可以根据用户的描述和意图对提示词进行扩充，使其更加详细（例如扩充为包含风格、光影、细节的专业提示词）。")
+        ))
         logger.info("FigurinePro 插件已加载 (lmarena 风格)")
 
     async def _load_prompt_map(self):
