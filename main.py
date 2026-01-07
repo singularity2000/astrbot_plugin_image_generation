@@ -31,8 +31,8 @@ class ImageGenTool(FunctionTool):
         },
         "required": ["prompt"],
     })
-    source: str = "plugin"
-    source_name: str = "astrbot_plugin_image_generation"
+    source: str = ""
+    source_name: str = ""
     plugin: object = field(default=None, repr=False)
 
     async def run(self, event: AstrMessageEvent, prompt: str):
@@ -158,12 +158,15 @@ class FigurineProPlugin(Star):
                 yield event.plain_result(error_msg)
                 return
 
-            # 原子化扣费检查
-            if deduction_error := await self.persistence.check_and_deduct_count(sender_id, group_id):
-                yield event.plain_result(deduction_error)
-                return
+            # 原子化扣费检查 (Vertex_AI_Anonymous 免费)
+            api_from = self.conf.get("api_from")
+            if api_from != "Vertex_AI_Anonymous":
+                if deduction_error := await self.persistence.check_and_deduct_count(sender_id, group_id):
+                    yield event.plain_result(deduction_error)
+                    return
 
         # --- 图片获取 (仅图生图) ---
+
         images_to_process = []
         if is_i2i:
             if not self.iwf or not (img_bytes_list := await self.iwf.get_images(event)):

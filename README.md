@@ -4,7 +4,9 @@
 
 ## 功能特性
 
-- **多API支持**：支持多个 API 服务商（硅基流动、智谱 AI、OpenAI-responses、Flow2API 等），可随意切换。
+- **多API支持**：支持多个 API 服务商（硅基流动、智谱 AI、OpenAI-responses、Flow2API、Vertex AI (Google) 等），可随意切换。
+- **免费接口支持**：新增 **Vertex_AI_Anonymous** 接口，基于 Google Gemini 模型，无需 API Key 即可免费使用（需配置反代或确保网络通畅）。
+- **LLM 函数调用**：支持 AstrBot 的函数调用（Function Calling）机制。开启后，机器人可以理解自然语言对话，智能判断是否需要画图，并自动调用插件生成图片，无需用户手动输入指令。
 - **多风格转换**：内置几十种指令，如 `#手办化`、`#Q版化`、`#痛车化`、`#鬼图` 等，满足不同场景需求。
 - **自定义生成**：使用 `图生图 <提示词>` 指令（前缀可自定义），可以完全自定义 Prompt 进行创作。
 - **文生图支持**：新增 `#文生图` 指令，支持纯文本描述直接生成图像。
@@ -28,10 +30,15 @@
 
 | 配置项             | 类型   | 描述                                                                                                                              |
 | ------------------ | ------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `api_from`         | 字符串 | **API 来源选择**，可选值：`siliconflow`、`bigmodel`、`OpenAI-responses`、`Flow2API`。                                                      |
-| `api_url`          | 字符串 | **(必需)** API 的请求地址。                                                                                                       |
+| `api_from`         | 字符串 | **API 来源选择**，可选值：`siliconflow`、`bigmodel`、`OpenAI-responses`、`Flow2API`、`Vertex_AI_Anonymous`。                                                      |
+| `api_url`          | 字符串 | **(必需)** API 的请求地址。Vertex_AI_Anonymous 可留空。                                                                                                       |
 | `model`            | 字符串 | **(必需)** 图生图和文生图使用的默认模型名称。                                                                                      |
-| `api_keys`         | 列表   | **(必需)** 你的 API 密钥。可以通过 `#画图添加key` 指令管理，支持多个 Key。                                                             |
+| `api_keys`         | 列表   | **(必需)** 你的 API 密钥。可以通过 `#画图添加key` 指令管理，支持多个 Key。Vertex_AI_Anonymous 无需填写。                                                             |
+| `vertex_ai_system_prompt` | 文本 | **【VertexAI】系统提示词**，仅对 Vertex_AI_Anonymous 有效。可以指导模型生成特定风格的图片。 |
+| `vertex_ai_max_retry` | 整数 | **【VertexAI】最大重试次数**，默认为 10。由于匿名接口不稳定性，建议设置较高。 |
+| `recaptcha_base_api` | 字符串 | **【VertexAI】Recaptcha Base API**，默认为 `https://www.google.com`。若国内网络不通，可配置反代。 |
+| `vertex_ai_base_api` | 字符串 | **【VertexAI】Vertex AI Base API**，默认为 `https://cloudconsole-pa.clients6.google.com`。若国内网络不通，可配置反代。 |
+| `llm_tool_description` | 字符串 | **函数工具描述**，自定义 LLM 调用此工具时的功能介绍。用于引导 LLM 何时调用画图功能。 |
 | `api_timeout`      | 整数   | **API 请求超时 (秒)**，默认为 `180`。                                                                                             |
 | `download_timeout` | 整数   | **图片下载超时 (秒)**，默认为 `30`。                                                                                              |
 | `rate_limit_seconds` | 整数 | **全局调用频率限制 (秒)**，默认为 `120`。规定插件在两次生图API调用之间必须等待的时间。管理员无视此限制。                                 |
@@ -51,6 +58,14 @@
 | `enable_checkin`        | 开关   | 是否开启每日签到功能。                                                                                                            |
 
 ## 使用方法
+
+### 智能画图 (LLM Function Calling)
+
+如果你的 AstrBot 配置了支持 Function Calling 的 LLM（如 GPT-4, Claude 3 等），你可以直接在对话中让机器人画图，例如：
+- "帮我画一只可爱的小猫"
+- "把这张图变成手办风格"（需引用图片）
+
+机器人会智能判断并调用插件进行生成。
 
 ### 图生图
 
@@ -128,8 +143,8 @@
 | :--- | :--- |
 | `图生图 <提示词>` | 使用自定义提示词进行图生图（前缀取决于 `extra_prefix` 配置） |
 | `#文生图 <描述>` | 使用文字描述直接生成图像 |
-| `#lm帮助` / `#lmh` | 查询预设指令列表 |
-| `#lm帮助 <预设名>` | 查看指定预设的 Prompt 内容 |
+| `#画图帮助` / `#lm帮助` | 查询预设指令列表 |
+| `#画图帮助 <预设名>` | 查看指定预设的 Prompt 内容 |
 | `#画图查询次数` | 查询自己的剩余次数 |
 | `#画图签到` | 进行每日签到获取次数（需启用签到功能） |
 
@@ -137,7 +152,7 @@
 
 | 命令 | 功能说明 |
 | :--- | :--- |
-| `#lm添加 <触发词>:<提示词>` | 添加或更新预设指令 |
+| `#画图添加模板 <触发词>:<提示词>` | 添加或更新预设指令 (别名: `#lm添加`) |
 | `#画图添加key <key1>...` | 添加一个或多个 API 密钥 |
 | `#画图key列表` | 查看 API 密钥列表 |
 | `#画图删除key <序号\|all>` | 删除 API 密钥 |

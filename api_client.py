@@ -2,9 +2,13 @@ import asyncio
 import base64
 import json
 import re
+import string
+import random
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Union
+from urllib.parse import parse_qs, urlparse
 import aiohttp
+from bs4 import BeautifulSoup
 from astrbot import logger
 from astrbot.core import AstrBotConfig
 from .workflow import ImageWorkflow
@@ -56,6 +60,8 @@ class ImageGenAPI:
             return await self._call_openai_responses_api(image_bytes_list, prompt)
         if api_from == "Flow2API":
             return await self._call_flow2api_api(image_bytes_list, prompt)
+        if api_from == "Vertex_AI_Anonymous":
+            return await self._call_vertex_ai_anonymous_api(image_bytes_list, prompt)
 
         # 通用 API 逻辑
         api_url = self.conf.get("api_url")
@@ -157,3 +163,119 @@ class ImageGenAPI:
                     return base64.b64decode(b64)
                 return "未找到图像数据"
         except Exception as e: return str(e)
+
+    async def _call_vertex_ai_anonymous_api(self, image_bytes_list: List[bytes], prompt: str) -> Union[bytes, str]:
+        model_name = self.conf.get("model", "gemini-3-pro-image-preview")
+            
+        parts = [{"text": prompt}]
+        for img in image_bytes_list:
+            parts.append({"inlineData": {"mimeType": "image/png", "data": base64.b64encode(img).decode('utf-8')}})
+
+        context = {
+            "model": model_name,
+            "contents": [{"parts": parts, "role": "user"}],
+            "generationConfig": {
+                "temperature": 1,
+                "topP": 0.95,
+                "maxOutputTokens": 32768,
+                "responseModalities": ["IMAGE"],
+                "imageConfig": {"imageOutputOptions": {"mimeType": "image/png"}, "personGeneration": "ALLOW_ALL"},
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+            ],
+            "region": "global",
+        }
+        
+        system_prompt = self.conf.get("vertex_ai_system_prompt", "")
+        if system_prompt:
+            context["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+        body = {
+            "querySignature": "2/l8eCsMMY49imcDQ/lwwXyL8cYtTjxZBF2dNqy69LodY=",
+            "operationName": "StreamGenerateContentAnonymous",
+            "variables": context,
+        }
+
+        max_retry = self.conf.get("vertex_ai_max_retry", 10)
+        recaptcha_base = self.conf.get("recaptcha_base_api", "https://www.google.com")
+        vertex_base = self.conf.get("vertex_ai_base_api", "https://cloudconsole-pa.clients6.google.com")
+        
+        last_err = "未知错误"
+        for i in range(max_retry):
+            token = await self._get_recaptcha_token(recaptcha_base)
+            if not token:
+                last_err = "获取 recaptcha token 失败"
+                continue
+            
+            body["variables"]["recaptchaToken"] = token
+            url = f"{vertex_base}/v3/entityServices/AiplatformEntityService/schemas/AIPLATFORM_GRAPHQL:batchGraphql?key=AIzaSyCI-zsRP85UVOi0DjtiCwWBwQ1djDy741g&prettyPrint=false"
+            headers = {"referer": "https://console.cloud.google.com/", "Content-Type": "application/json"}
+            
+            try:
+                # 尽量模拟浏览器指纹
+                # aiohttp 不支持 impersonate，但我们可以手动设置一些 headers
+                headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                async with self.iwf.session.post(url, json=body, headers=headers, proxy=self.iwf.proxy, timeout=self.conf.get("api_timeout", 180)) as resp:
+                    if resp.status != 200:
+                        last_err = f"API请求失败 (HTTP {resp.status})"
+                        continue
+                    
+                    result = await resp.json()
+                    for elem in result:
+                        for item in elem.get("results", []):
+                            if item.get("errors"):
+                                last_err = f"API返回错误: {item['errors'][0].get('message')}"
+                                # 如果是安全拦截，直接跳过重试
+                                if "SAFETY" in last_err or "content" in last_err.lower(): return last_err
+                                continue
+                            
+                            for candidate in item.get("data", {}).get("candidates", []):
+                                if candidate.get("finishReason") == "STOP":
+                                    for part in candidate.get("content", {}).get("parts", []):
+                                        if "inlineData" in part and part["inlineData"].get("data"):
+                                            return base64.b64decode(part["inlineData"]["data"])
+                                else:
+                                    last_err = f"生成中断: {candidate.get('finishReason')}"
+            except Exception as e:
+                last_err = str(e)
+            
+            logger.warning(f"Vertex AI API 调用失败，重试 ({i+1}/{max_retry}): {last_err}")
+            await asyncio.sleep(1)
+            
+        return f"Vertex AI 生成失败: {last_err}"
+
+    async def _get_recaptcha_token(self, base_url: str) -> Optional[str]:
+        try:
+            for _ in range(3):
+                cb = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+                anchor_url = f"{base_url}/recaptcha/enterprise/anchor?ar=1&k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj&co=aHR0cHM6Ly9jb25zb2xlLmNsb3VkLmdvb2dsZS5jb206NDQz&hl=zh-CN&v=jdMmXeCQEkPbnFDy9T04NbgJ&size=invisible&anchor-ms=20000&execute-ms=15000&cb={cb}"
+                
+                async with self.iwf.session.get(anchor_url, proxy=self.iwf.proxy) as resp:
+                    if resp.status != 200: continue
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, "html.parser")
+                    token_input = soup.find("input", {"id": "recaptcha-token"})
+                    if not token_input: continue
+                    base_token = token_input.get("value")
+                
+                reload_url = f"{base_url}/recaptcha/enterprise/reload?k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj"
+                parsed = urlparse(anchor_url)
+                query_params = parse_qs(parsed.query)
+                payload = {
+                    "v": query_params["v"][0], "reason": "q", "k": query_params["k"][0], "c": base_token,
+                    "co": query_params["co"][0], "hl": query_params["hl"][0], "size": "invisible",
+                    "vh": "6581054572", "chr": "", "bg": "",
+                }
+                
+                async with self.iwf.session.post(reload_url, data=payload, proxy=self.iwf.proxy) as resp:
+                    if resp.status != 200: continue
+                    text = await resp.text()
+                    match = re.search(r'rresp","(.*?)"', text)
+                    if match: return match.group(1)
+        except Exception as e:
+            logger.error(f"获取 recaptcha token 过程中发生异常: {str(e)}")
+        return None
