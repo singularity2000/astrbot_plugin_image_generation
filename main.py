@@ -31,8 +31,6 @@ class ImageGenTool(FunctionTool):
         },
         "required": ["prompt"],
     })
-    source: str = ""
-    source_name: str = ""
     plugin: object = field(default=None, repr=False)
 
     async def run(self, event: AstrMessageEvent, prompt: str):
@@ -70,7 +68,7 @@ class ImageGenTool(FunctionTool):
     "2.0.0", 
     "https://github.com/singularity2000/astrbot_plugin_image_generation",
 )
-class FigurineProPlugin(Star):
+class ImageGenerationPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.conf = config
@@ -100,7 +98,7 @@ class FigurineProPlugin(Star):
         image_gen_tool.parameters["properties"]["prompt"]["description"] = custom_prompt_desc
         
         self.context.add_llm_tools(image_gen_tool)
-        logger.info("FigurinePro 插件已加载 (lmarena 风格)")
+        logger.info("astrbot_plugin_image_generation 插件已加载")
 
     async def _load_prompt_map(self):
         logger.info("正在加载 prompts...")
@@ -118,7 +116,7 @@ class FigurineProPlugin(Star):
         logger.info(f"加载了 {len(self.prompt_map)} 个 prompts。")
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=5)
-    async def on_figurine_request(self, event: AstrMessageEvent):
+    async def on_image_gen_request(self, event: AstrMessageEvent):
         if self.conf.get("prefix", True) and not event.is_at_or_wake_command:
             return
         text = event.message_str.strip()
@@ -379,4 +377,5 @@ class FigurineProPlugin(Star):
 
     async def terminate(self):
         if self.iwf: await self.iwf.terminate()
-        logger.info("[FigurinePro] 插件已终止")
+        if self.api_client: await self.api_client.close()
+        logger.info("[astrbot_plugin_image_generation] 插件已终止")

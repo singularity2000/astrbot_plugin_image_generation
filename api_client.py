@@ -8,6 +8,11 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Union
 from urllib.parse import parse_qs, urlparse
 import aiohttp
+try:
+    from curl_cffi.requests import AsyncSession as CurlSession
+    CURL_CFFI_AVAILABLE = True
+except ImportError:
+    CURL_CFFI_AVAILABLE = False
 from bs4 import BeautifulSoup
 from astrbot import logger
 from astrbot.core import AstrBotConfig
@@ -24,6 +29,21 @@ class ImageGenAPI:
         
         self.form = {"siliconflow": "images", "bigmodel": "data"}
         self.data_form = self.form.get(self.conf.get("api_from"), "images")
+        self._curl_session = None
+
+    async def _get_curl_session(self):
+        """获取或创建持久化的 curl_cffi 会话"""
+        if not CURL_CFFI_AVAILABLE:
+            return None
+        if self._curl_session is None:
+            self._curl_session = CurlSession(impersonate="chrome131", proxy=self.iwf.proxy)
+        return self._curl_session
+
+    async def close(self):
+        """关闭会话"""
+        if self._curl_session:
+            self._curl_session.close()
+            self._curl_session = None
 
     async def _get_api_key(self) -> Optional[str]:
         keys = self.conf.get("api_keys", [])
@@ -214,6 +234,7 @@ class ImageGenAPI:
         max_retry = self.conf.get("vertex_ai_max_retry", 10)
         recaptcha_base = self.conf.get("recaptcha_base_api", "https://www.google.com")
         vertex_base = self.conf.get("vertex_ai_base_api", "https://cloudconsole-pa.clients6.google.com")
+        api_timeout = self.conf.get("api_timeout", 180)
         
         last_err = "未知错误"
         for i in range(max_retry):
@@ -224,104 +245,32 @@ class ImageGenAPI:
             
             body["variables"]["recaptchaToken"] = token
             url = f"{vertex_base}/v3/entityServices/AiplatformEntityService/schemas/AIPLATFORM_GRAPHQL:batchGraphql?key=AIzaSyCI-zsRP85UVOi0DjtiCwWBwQ1djDy741g&prettyPrint=false"
-            headers = {
-                "referer": "https://console.cloud.google.com/", 
-                "Content-Type": "application/json",
-                "Origin": "https://console.cloud.google.com",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-site",
-                "x-goog-ext-271330232-jsp": "2",
-                "x-goog-ext-271330232-u": "1",
-            }
             
-            try:
-                # 尽量模拟浏览器指纹
-                # aiohttp 不支持 impersonate，但我们可以手动设置一些 headers
-                headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                headers["Accept-Encoding"] = "identity" # 禁用压缩以简化处理
-                
-                # 设置更长的读取超时。_call_vertex_ai_anonymous_api 是在一个循环里调用的，
-                # 我们这里使用配置中的 api_timeout。
-                api_timeout = self.conf.get("api_timeout", 180)
-                client_timeout = aiohttp.ClientTimeout(total=api_timeout, sock_read=api_timeout)
-                
-                async with self.iwf.session.post(url, json=body, headers=headers, proxy=self.iwf.proxy, timeout=client_timeout) as resp:
-                    logger.debug(f"Vertex AI API response headers: {resp.headers}")
-                    if resp.status != 200:
-                        last_err = f"API请求失败 (HTTP {resp.status})"
-                        try:
-                            error_detail = await resp.text()
-                            logger.error(f"Vertex AI API error detail: {error_detail}")
-                        except:
-                            pass
+            # 使用 curl_cffi 以规避指纹风控
+            if CURL_CFFI_AVAILABLE:
+                try:
+                    # 仅保留最基础的业务 Headers，指纹相关 Headers 由 impersonate 自动接管
+                    headers = {
+                        "referer": "https://console.cloud.google.com/", 
+                        "Content-Type": "application/json",
+                    }
+                    session = await self._get_curl_session()
+                    resp = await session.post(url, json=body, headers=headers, timeout=api_timeout)
+                    
+                    if resp.status_code != 200:
+                        last_err = f"API请求失败 (HTTP {resp.status_code})"
+                        # 识别 429
+                        if resp.status_code == 429:
+                            last_err = "API返回错误: 频率限制 (Resource exhausted)"
+                        logger.warning(f"Vertex AI API error detail (Status {resp.status_code}): {resp.text[:500]}")
                         continue
                     
-                    try:
-                        # 尝试分块读取，即使中途断开也保留已下载的数据
-                        chunks = []
-                        async for chunk in resp.content.iter_any():
-                            chunks.append(chunk)
-                        content_bytes = b"".join(chunks)
-                        
-                        if not content_bytes:
-                             last_err = "接收到的数据为空"
-                             continue
-                             
-                        try:
-                            result = json.loads(content_bytes)
-                        except json.JSONDecodeError as je:
-                            # 如果 JSON 解析失败，检查是否是因为截断但大部分数据已到
-                            logger.error(f"JSON decode error: {je}. Attempting to salvage partial data...")
-                            # 尝试修复截断的 JSON（Vertex AI 的响应是一个包含多个对象的列表）
-                            # 如果是因为结尾截断，可能可以找到最后一个完整的对象
-                            content_str = content_bytes.decode('utf-8', errors='ignore')
-                            if content_str.strip().startswith('['):
-                                # 寻找最后一个完整的闭合花括号
-                                last_brace = content_str.rfind('}')
-                                if last_brace != -1:
-                                    try:
-                                        # 补全列表闭合符号
-                                        salvaged_json = content_str[:last_brace+1] + ']'
-                                        result = json.loads(salvaged_json)
-                                        logger.info("Successfully salvaged partial JSON data.")
-                                    except:
-                                        raise je
-                                else:
-                                    raise je
-                            else:
-                                raise je
-                    except aiohttp.ClientPayloadError as e:
-                        # 即使发生 PayloadError，如果 chunks 里有数据，也尝试解析
-                        if chunks:
-                            logger.warning(f"Payload error occurred, but some data was received ({len(b''.join(chunks))} bytes). Trying to parse...")
-                            content_bytes = b"".join(chunks)
-                            # 重复上面的救灾逻辑
-                            content_str = content_bytes.decode('utf-8', errors='ignore')
-                            last_brace = content_str.rfind('}')
-                            if last_brace != -1:
-                                try:
-                                    result = json.loads(content_str[:last_brace+1] + ']')
-                                except:
-                                    last_err = f"数据截断且无法挽救: {e}"
-                                    continue
-                            else:
-                                last_err = f"数据截断且无有效内容: {e}"
-                                continue
-                        else:
-                            logger.error(f"Payload error during reading: {e}")
-                            last_err = f"Response payload is not completed: {e}"
-                            continue
-                    except Exception as e:
-                        logger.error(f"Unexpected error during response processing: {e}")
-                        last_err = f"响应处理异常: {e}"
-                        continue
-                    
+                    result = resp.json()
+                    # 核心解析逻辑
                     for elem in result:
                         for item in elem.get("results", []):
                             if item.get("errors"):
                                 last_err = f"API返回错误: {item['errors'][0].get('message')}"
-                                # 如果是安全拦截，直接跳过重试
                                 if "SAFETY" in last_err or "content" in last_err.lower(): return last_err
                                 continue
                             
@@ -329,29 +278,112 @@ class ImageGenAPI:
                                 if candidate.get("finishReason") == "STOP":
                                     for part in candidate.get("content", {}).get("parts", []):
                                         if "inlineData" in part and part["inlineData"].get("data"):
-                                            # 成功提取，返回数据
-                                            logger.info(f"Successfully extracted image data ({len(part['inlineData']['data'])} chars)")
-                                            return base64.b64decode(part["inlineData"]["data"])
+                                            img_data = part["inlineData"]["data"]
+                                            logger.info(f"Successfully extracted image data ({len(img_data)} chars)")
+                                            return base64.b64decode(img_data)
                                 elif candidate.get("finishReason"):
                                     last_err = f"生成中断: {candidate.get('finishReason')}"
-                                else:
-                                    last_err = "API返回了空结果"
-                    else:
-                        last_err = f"无法从响应中解析出有效数据 (收到 {len(content_bytes)} 字节)"
-            except aiohttp.ClientConnectorError as e:
-                last_err = f"网络连接失败 (代理可能不可用): {e}"
-            except asyncio.TimeoutError:
-                last_err = f"请求超时 (当前限制: {api_timeout}s)"
-            except Exception as e:
-                last_err = f"请求异常: {str(e)}"
-                logger.exception("Vertex AI API call error")
+                except Exception as e:
+                    last_err = f"curl_cffi 请求异常: {str(e)}"
+            else:
+                # 回退到 aiohttp 逻辑 (保持基本的指纹优化)
+                headers = {
+                    "referer": "https://console.cloud.google.com/", 
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    "Origin": "https://console.cloud.google.com",
+                    "Accept-Encoding": "identity"
+                }
+                client_timeout = aiohttp.ClientTimeout(total=api_timeout, sock_read=api_timeout)
+                try:
+                    async with self.iwf.session.post(url, json=body, headers=headers, proxy=self.iwf.proxy, timeout=client_timeout) as resp:
+                        if resp.status != 200:
+                            last_err = f"API请求失败 (HTTP {resp.status})"
+                            continue
+                        
+                        chunks = []
+                        async for chunk in resp.content.iter_any():
+                            chunks.append(chunk)
+                        content_bytes = b"".join(chunks)
+                        
+                        try:
+                            result = json.loads(content_bytes)
+                        except:
+                            # 尝试救灾解析截断的 JSON
+                            content_str = content_bytes.decode('utf-8', errors='ignore')
+                            last_brace = content_str.rfind('}')
+                            if last_brace != -1:
+                                result = json.loads(content_str[:last_brace+1] + ']')
+                            else:
+                                last_err = f"无法解析响应 (收到 {len(content_bytes)} 字节)"
+                                continue
+
+                        for elem in result:
+                            for item in elem.get("results", []):
+                                if item.get("errors"):
+                                    last_err = f"API返回错误: {item['errors'][0].get('message')}"
+                                    if "SAFETY" in last_err or "content" in last_err.lower(): return last_err
+                                    continue
+                                for candidate in item.get("data", {}).get("candidates", []):
+                                    if candidate.get("finishReason") == "STOP":
+                                        for part in candidate.get("content", {}).get("parts", []):
+                                            if "inlineData" in part and part["inlineData"].get("data"):
+                                                return base64.b64decode(part["inlineData"]["data"])
+                except Exception as e:
+                    last_err = f"aiohttp 请求异常: {str(e)}"
             
             logger.warning(f"Vertex AI API 调用失败，重试 ({i+1}/{max_retry}): {last_err}")
-            await asyncio.sleep(1)
+            # 引入随机退避重试，模拟真人行为
+            backoff_time = 2 + random.uniform(1, 4)
+            if "Resource exhausted" in last_err:
+                backoff_time += 5 # 遇到 429 额外多等一会儿
+            await asyncio.sleep(backoff_time)
             
         return f"Vertex AI 生成失败: {last_err}"
 
+    async def _get_recaptcha_token_curl(self, base_url: str) -> Optional[str]:
+        """使用 curl_cffi 获取 Recaptcha Token，保持指纹一致性"""
+        session = await self._get_curl_session()
+        if not session: return None
+        
+        try:
+            for _ in range(3):
+                cb = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+                anchor_url = f"{base_url}/recaptcha/enterprise/anchor?ar=1&k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj&co=aHR0cHM6Ly9jb25zb2xlLmNsb3VkLmdvb2dsZS5jb206NDQz&hl=zh-CN&v=jdMmXeCQEkPbnFDy9T04NbgJ&size=invisible&anchor-ms=20000&execute-ms=15000&cb={cb}"
+                
+                # 1. GET Anchor
+                resp = await session.get(anchor_url)
+                if resp.status_code != 200: continue
+                
+                soup = BeautifulSoup(resp.text, "html.parser")
+                token_input = soup.find("input", {"id": "recaptcha-token"})
+                if not token_input: continue
+                base_token = token_input.get("value")
+                
+                # 2. POST Reload
+                reload_url = f"{base_url}/recaptcha/enterprise/reload?k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj"
+                parsed = urlparse(anchor_url)
+                query_params = parse_qs(parsed.query)
+                payload = {
+                    "v": query_params["v"][0], "reason": "q", "k": query_params["k"][0], "c": base_token,
+                    "co": query_params["co"][0], "hl": query_params["hl"][0], "size": "invisible",
+                    "vh": "6581054572", "chr": "", "bg": "",
+                }
+                
+                resp = await session.post(reload_url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"})
+                if resp.status_code != 200: continue
+                
+                match = re.search(r'rresp","(.*?)"', resp.text)
+                if match: return match.group(1)
+        except Exception as e:
+            logger.error(f"curl_cffi 获取 recaptcha token 异常: {str(e)}")
+        return None
+
     async def _get_recaptcha_token(self, base_url: str) -> Optional[str]:
+        # 优先使用 curl_cffi 路径
+        if CURL_CFFI_AVAILABLE:
+            return await self._get_recaptcha_token_curl(base_url)
+            
         try:
             for _ in range(3):
                 cb = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
