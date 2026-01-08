@@ -209,9 +209,9 @@ class FigurineProPlugin(Star):
                 caption_parts.append("管理员剩余次数: ∞")
             else:
                 if self.conf.get("enable_user_limit", True): 
-                    caption_parts.append(f"个人剩余: {self.persistence.get_user_count(sender_id)}")
+                    caption_parts.append(f"个人剩余次数: {self.persistence.get_user_count(sender_id)}")
                 if self.conf.get("enable_group_limit", False) and group_id: 
-                    caption_parts.append(f"本群剩余: {self.persistence.get_group_count(group_id)}")
+                    caption_parts.append(f"本群剩余次数: {self.persistence.get_group_count(group_id)}")
             
             yield event.chain_result([Image.fromBytes(res), Plain(" | ".join(caption_parts))])
         else:
