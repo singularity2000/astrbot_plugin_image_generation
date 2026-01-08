@@ -224,18 +224,99 @@ class ImageGenAPI:
             
             body["variables"]["recaptchaToken"] = token
             url = f"{vertex_base}/v3/entityServices/AiplatformEntityService/schemas/AIPLATFORM_GRAPHQL:batchGraphql?key=AIzaSyCI-zsRP85UVOi0DjtiCwWBwQ1djDy741g&prettyPrint=false"
-            headers = {"referer": "https://console.cloud.google.com/", "Content-Type": "application/json"}
+            headers = {
+                "referer": "https://console.cloud.google.com/", 
+                "Content-Type": "application/json",
+                "Origin": "https://console.cloud.google.com",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-site",
+                "x-goog-ext-271330232-jsp": "2",
+                "x-goog-ext-271330232-u": "1",
+            }
             
             try:
                 # 尽量模拟浏览器指纹
                 # aiohttp 不支持 impersonate，但我们可以手动设置一些 headers
                 headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                async with self.iwf.session.post(url, json=body, headers=headers, proxy=self.iwf.proxy, timeout=self.conf.get("api_timeout", 180)) as resp:
+                headers["Accept-Encoding"] = "identity" # 禁用压缩以简化处理
+                
+                # 设置更长的读取超时。_call_vertex_ai_anonymous_api 是在一个循环里调用的，
+                # 我们这里使用配置中的 api_timeout。
+                api_timeout = self.conf.get("api_timeout", 180)
+                client_timeout = aiohttp.ClientTimeout(total=api_timeout, sock_read=api_timeout)
+                
+                async with self.iwf.session.post(url, json=body, headers=headers, proxy=self.iwf.proxy, timeout=client_timeout) as resp:
+                    logger.debug(f"Vertex AI API response headers: {resp.headers}")
                     if resp.status != 200:
                         last_err = f"API请求失败 (HTTP {resp.status})"
+                        try:
+                            error_detail = await resp.text()
+                            logger.error(f"Vertex AI API error detail: {error_detail}")
+                        except:
+                            pass
                         continue
                     
-                    result = await resp.json()
+                    try:
+                        # 尝试分块读取，即使中途断开也保留已下载的数据
+                        chunks = []
+                        async for chunk in resp.content.iter_any():
+                            chunks.append(chunk)
+                        content_bytes = b"".join(chunks)
+                        
+                        if not content_bytes:
+                             last_err = "接收到的数据为空"
+                             continue
+                             
+                        try:
+                            result = json.loads(content_bytes)
+                        except json.JSONDecodeError as je:
+                            # 如果 JSON 解析失败，检查是否是因为截断但大部分数据已到
+                            logger.error(f"JSON decode error: {je}. Attempting to salvage partial data...")
+                            # 尝试修复截断的 JSON（Vertex AI 的响应是一个包含多个对象的列表）
+                            # 如果是因为结尾截断，可能可以找到最后一个完整的对象
+                            content_str = content_bytes.decode('utf-8', errors='ignore')
+                            if content_str.strip().startswith('['):
+                                # 寻找最后一个完整的闭合花括号
+                                last_brace = content_str.rfind('}')
+                                if last_brace != -1:
+                                    try:
+                                        # 补全列表闭合符号
+                                        salvaged_json = content_str[:last_brace+1] + ']'
+                                        result = json.loads(salvaged_json)
+                                        logger.info("Successfully salvaged partial JSON data.")
+                                    except:
+                                        raise je
+                                else:
+                                    raise je
+                            else:
+                                raise je
+                    except aiohttp.ClientPayloadError as e:
+                        # 即使发生 PayloadError，如果 chunks 里有数据，也尝试解析
+                        if chunks:
+                            logger.warning(f"Payload error occurred, but some data was received ({len(b''.join(chunks))} bytes). Trying to parse...")
+                            content_bytes = b"".join(chunks)
+                            # 重复上面的救灾逻辑
+                            content_str = content_bytes.decode('utf-8', errors='ignore')
+                            last_brace = content_str.rfind('}')
+                            if last_brace != -1:
+                                try:
+                                    result = json.loads(content_str[:last_brace+1] + ']')
+                                except:
+                                    last_err = f"数据截断且无法挽救: {e}"
+                                    continue
+                            else:
+                                last_err = f"数据截断且无有效内容: {e}"
+                                continue
+                        else:
+                            logger.error(f"Payload error during reading: {e}")
+                            last_err = f"Response payload is not completed: {e}"
+                            continue
+                    except Exception as e:
+                        logger.error(f"Unexpected error during response processing: {e}")
+                        last_err = f"响应处理异常: {e}"
+                        continue
+                    
                     for elem in result:
                         for item in elem.get("results", []):
                             if item.get("errors"):
@@ -248,11 +329,22 @@ class ImageGenAPI:
                                 if candidate.get("finishReason") == "STOP":
                                     for part in candidate.get("content", {}).get("parts", []):
                                         if "inlineData" in part and part["inlineData"].get("data"):
+                                            # 成功提取，返回数据
+                                            logger.info(f"Successfully extracted image data ({len(part['inlineData']['data'])} chars)")
                                             return base64.b64decode(part["inlineData"]["data"])
-                                else:
+                                elif candidate.get("finishReason"):
                                     last_err = f"生成中断: {candidate.get('finishReason')}"
+                                else:
+                                    last_err = "API返回了空结果"
+                    else:
+                        last_err = f"无法从响应中解析出有效数据 (收到 {len(content_bytes)} 字节)"
+            except aiohttp.ClientConnectorError as e:
+                last_err = f"网络连接失败 (代理可能不可用): {e}"
+            except asyncio.TimeoutError:
+                last_err = f"请求超时 (当前限制: {api_timeout}s)"
             except Exception as e:
-                last_err = str(e)
+                last_err = f"请求异常: {str(e)}"
+                logger.exception("Vertex AI API call error")
             
             logger.warning(f"Vertex AI API 调用失败，重试 ({i+1}/{max_retry}): {last_err}")
             await asyncio.sleep(1)
