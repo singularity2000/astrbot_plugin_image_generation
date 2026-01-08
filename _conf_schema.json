@@ -48,6 +48,13 @@
         "default": "https://cloudconsole-pa.clients6.google.com",
         "hint": "Vertex AI匿名接口的基础地址。若国内网络不通且无代理，可配置反代地址。"
     },
+    "vertex_ai_image_size": {
+        "description": "【VertexAI】生图清晰度",
+        "type": "string",
+        "default": "智能匹配",
+        "options": ["1K", "2K", "4K", "智能匹配"],
+        "hint": "生成图片的分辨率等级。'智能匹配'将优先使用提示词中的 1K/2K/4K 关键词，匹配不到则默认 1K。"
+    },
     "api_keys": {
         "description": "API 密钥列表",
         "type": "list",
@@ -236,9 +243,15 @@
         ]
     },
     "llm_tool_description": {
-        "description": "函数工具描述",
-        "type": "string",
+        "description": "【函数调用】函数工具描述",
+        "type": "text",
         "hint": "自定义 LLM 调用此工具时的功能介绍。",
-        "default": "这是一个高级图片生成工具。主要功能为文生图、图生图。理解用户意图，仅当用户需要你画图，或修改图片内容时，才调用此工具，并智能决定调用文生图还是图生图。你可以根据用户的描述和意图对提示词进行扩充，使其更加详细（例如扩充为包含风格、光影、细节的专业提示词）。"
+        "default": "专业的文生图、图生图工具。理解用户语义，仅当用户需要你生图，或修改图片内容时才调用此工具。"
+    },
+    "llm_prompt_description": {
+        "description": "【函数调用】生图提示词扩充指南",
+        "type": "text",
+        "default": "Change the user's input into a professional image generation prompt. Specify the artistic style, lighting, and intricate details while strictly preserving the original intent.",
+        "hint": "当 LLM 决定调用画图工具时，该描述将指导 LLM 如何构造发送给绘图 API 的最终 Prompt。建议使用英文以获得更好的模型遵循效果。"
     }
 }

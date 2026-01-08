@@ -86,10 +86,20 @@ class FigurineProPlugin(Star):
         self.api_client = ImageGenAPI(self.conf, self.iwf)
         await self.persistence.load_all()
         await self._load_prompt_map()
-        self.context.add_llm_tools(ImageGenTool(
+        
+        # 实例化工具并动态注入配置描述
+        image_gen_tool = ImageGenTool(
             plugin=self,
-            description=self.conf.get("llm_tool_description", "这是一个高级图片生成工具。主要功能为文生图、图生图。理解用户意图，仅当用户需要你画图，或修改图片内容时，才调用此工具，并智能决定调用文生图还是图生图。你可以根据用户的描述和意图对提示词进行扩充，使其更加详细（例如扩充为包含风格、光影、细节的专业提示词）。")
-        ))
+            description=self.conf.get("llm_tool_description", "这是一个高级图片生成工具。主要功能为文生图、图生图。理解用户意图，仅当用户需要你画图，或修改图片内容时，才调用此工具，并智能决定调用文生图还是图生图。你可以根据用户的描述 and 意图对提示词进行扩充，使其更加详细（例如扩充为包含风格、光影、细节的专业提示词）。")
+        )
+        
+        custom_prompt_desc = self.conf.get(
+            "llm_prompt_description",
+            "Change the user's input into a professional image generation prompt. Specify the artistic style, lighting, and intricate details while strictly preserving the original intent."
+        )
+        image_gen_tool.parameters["properties"]["prompt"]["description"] = custom_prompt_desc
+        
+        self.context.add_llm_tools(image_gen_tool)
         logger.info("FigurinePro 插件已加载 (lmarena 风格)")
 
     async def _load_prompt_map(self):

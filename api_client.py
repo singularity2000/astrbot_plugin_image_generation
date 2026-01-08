@@ -171,6 +171,13 @@ class ImageGenAPI:
         for img in image_bytes_list:
             parts.append({"inlineData": {"mimeType": "image/png", "data": base64.b64encode(img).decode('utf-8')}})
 
+        # 清晰度处理
+        image_size = self.conf.get("vertex_ai_image_size", "智能匹配")
+        if image_size == "智能匹配":
+            # 按照从左到右的顺序匹配第一个出现的 1K, 2K, 或 4K
+            match = re.search(r'\b([124]K)\b', prompt, re.IGNORECASE)
+            image_size = match.group(1).upper() if match else "1K"
+
         context = {
             "model": model_name,
             "contents": [{"parts": parts, "role": "user"}],
@@ -179,7 +186,11 @@ class ImageGenAPI:
                 "topP": 0.95,
                 "maxOutputTokens": 32768,
                 "responseModalities": ["IMAGE"],
-                "imageConfig": {"imageOutputOptions": {"mimeType": "image/png"}, "personGeneration": "ALLOW_ALL"},
+                "imageConfig": {
+                    "imageOutputOptions": {"mimeType": "image/png"}, 
+                    "personGeneration": "ALLOW_ALL",
+                    "imageSize": image_size
+                },
             },
             "safetySettings": [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
