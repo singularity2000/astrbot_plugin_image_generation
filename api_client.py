@@ -25,6 +25,7 @@ class ImageGenAPI:
         self.key_index = 0
         self.key_lock = asyncio.Lock()
         self.api_call_lock = asyncio.Lock()
+        self.impersonate_index = 0
         self.last_api_call_time: Optional[datetime] = None
         
         self.form = {"siliconflow": "images", "bigmodel": "data"}
@@ -36,7 +37,17 @@ class ImageGenAPI:
         if not CURL_CFFI_AVAILABLE:
             return None
         if self._curl_session is None:
-            self._curl_session = CurlSession(impersonate="chrome131", proxy=self.iwf.proxy)
+            # 获取指纹列表并轮询
+            imp_list = self.conf.get("vertex_ai_impersonate_list", ["chrome131", "firefox135", "safari18_0"])
+            if not imp_list: imp_list = ["chrome131"] # Fallback
+            
+            impersonate = imp_list[self.impersonate_index % len(imp_list)]
+            self.impersonate_index += 1
+            
+            if self.conf.get("vertex_ai_verbose_logging", True):
+                logger.info(f"[VertexAI] 正在创建新会话 | 指纹: {impersonate} | 轮次: {self.impersonate_index}")
+                
+            self._curl_session = CurlSession(impersonate=impersonate, proxy=self.iwf.proxy)
         return self._curl_session
 
     async def close(self):
@@ -85,11 +96,9 @@ class ImageGenAPI:
 
         # 通用 API 逻辑
         api_url = self.conf.get("api_url")
-        api_key = await self._get_api_key()
-        if not api_url or not api_key: return "API 配置错误或无 Key"
+        if not api_url: return "API 配置错误: 未设置 URL"
         
         model_name = self.conf.get("model")
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         payload = {"model": model_name, "prompt": prompt}
 
         if image_bytes_list:
@@ -97,28 +106,43 @@ class ImageGenAPI:
                 key = "image" if i == 0 else f"image{i+1}"
                 payload[key] = f"data:image/png;base64,{base64.b64encode(img).decode('utf-8')}"
 
-        try:
-            timeout = self.conf.get("api_timeout", 180)
-            async with self.iwf.session.post(api_url, json=payload, headers=headers, proxy=self.iwf.proxy, timeout=timeout) as resp:
-                if resp.status != 200: return f"API请求失败 (HTTP {resp.status})"
-                data = await resp.json()
-                self.data_form = self.form.get(api_from, "images")
-                
-                try:
-                    url = data[self.data_form][0]["url"]
-                    if url.startswith("data:image/"):
-                        return base64.b64decode(url.split(",", 1)[1])
-                    return await self.iwf._download_image(url) or "下载失败"
-                except Exception:
-                    return f"解析响应失败: {str(data)[:200]}"
-        except Exception as e:
-            return f"错误: {e}"
+        max_retry = self.conf.get("provider_max_retry", 10)
+        last_err = "未知错误"
+        timeout = self.conf.get("api_timeout", 180)
+
+        for i in range(max_retry):
+            api_key = await self._get_api_key()
+            if not api_key: return "API 配置错误: 无 Key"
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+
+            try:
+                async with self.iwf.session.post(api_url, json=payload, headers=headers, proxy=self.iwf.proxy, timeout=timeout) as resp:
+                    if resp.status != 200:
+                        last_err = f"API请求失败 (HTTP {resp.status})"
+                    else:
+                        data = await resp.json()
+                        self.data_form = self.form.get(api_from, "images")
+                        try:
+                            url = data[self.data_form][0]["url"]
+                            if url.startswith("data:image/"):
+                                return base64.b64decode(url.split(",", 1)[1])
+                            return await self.iwf._download_image(url) or "下载失败"
+                        except Exception:
+                            last_err = f"解析响应失败: {str(data)[:200]}"
+            except Exception as e:
+                last_err = f"错误: {e}"
+            
+            # 随机退避重试
+            backoff_time = 2 + random.uniform(1, 4)
+            if "429" in str(last_err): backoff_time += 5
+            await asyncio.sleep(backoff_time)
+            
+        return f"API请求失败: {last_err}"
 
     async def _call_flow2api_api(self, image_bytes_list: List[bytes], prompt: str) -> Union[bytes, str]:
         api_url = self.conf.get("api_url")
-        api_key = await self._get_api_key()
         model_name = self.conf.get("model")
-        if not api_url or not api_key: return "配置错误"
+        if not api_url: return "配置错误: 无 API URL"
 
         content = [{"type": "text", "text": prompt}]
         for img in image_bytes_list:
@@ -126,28 +150,43 @@ class ImageGenAPI:
         
         payload = {"model": model_name, "messages": [{"role": "user", "content": content}], "stream": True}
         
-        try:
-            async with self.iwf.session.post(api_url, json=payload, headers={"Authorization": f"Bearer {api_key}"}, proxy=self.iwf.proxy) as resp:
-                if resp.status != 200: return f"HTTP {resp.status}"
-                response_text = await resp.text()
-                full_content = ""
-                for line in response_text.strip().split('\n'):
-                    if line.startswith("data: ") and "[DONE]" not in line:
-                        try:
-                            chunk = json.loads(line[6:])
-                            full_content += chunk["choices"][0].get("delta", {}).get("content", "")
-                        except: pass
-                
-                match = re.search(r'https?://[^\s)]+', full_content)
-                if match:
-                    url = match.group(0)
-                    return await self.iwf._download_image(url) or "下载失败"
-                return "未找到图片URL"
-        except Exception as e: return str(e)
+        max_retry = self.conf.get("provider_max_retry", 10)
+        last_err = "未知错误"
+
+        for i in range(max_retry):
+            api_key = await self._get_api_key()
+            if not api_key: return "配置错误: 无 API Key"
+
+            try:
+                async with self.iwf.session.post(api_url, json=payload, headers={"Authorization": f"Bearer {api_key}"}, proxy=self.iwf.proxy) as resp:
+                    if resp.status != 200:
+                        last_err = f"HTTP {resp.status}"
+                    else:
+                        response_text = await resp.text()
+                        full_content = ""
+                        for line in response_text.strip().split('\n'):
+                            if line.startswith("data: ") and "[DONE]" not in line:
+                                try:
+                                    chunk = json.loads(line[6:])
+                                    full_content += chunk["choices"][0].get("delta", {}).get("content", "")
+                                except: pass
+                        
+                        match = re.search(r'https?://[^\s)]+', full_content)
+                        if match:
+                            url = match.group(0)
+                            return await self.iwf._download_image(url) or "下载失败"
+                        last_err = "未找到图片URL"
+            except Exception as e: last_err = str(e)
+
+            # 随机退避重试
+            backoff_time = 2 + random.uniform(1, 4)
+            if "429" in str(last_err): backoff_time += 5
+            await asyncio.sleep(backoff_time)
+
+        return f"Flow2API 生成失败: {last_err}"
 
     async def _call_openai_responses_api(self, image_bytes_list: List[bytes], prompt: str) -> Union[bytes, str]:
         api_url = self.conf.get("api_url")
-        api_key = await self._get_api_key()
         model_name = self.conf.get("model")
         
         content_items = [{"type": "input_text", "text": prompt}]
@@ -161,30 +200,48 @@ class ImageGenAPI:
             "tool_choice": {"type": "image_generation"},
         }
 
-        try:
-            async with self.iwf.session.post(api_url, json=payload, headers={"Authorization": f"Bearer {api_key}"}, proxy=self.iwf.proxy) as resp:
-                data = await resp.json()
-                if resp.status != 200: return f"API错误: {data}"
-                
-                b64 = None
-                if data.get("object") == "response":
-                    for item in data.get("output", []):
-                        if item.get("type") == "image_generation_call":
-                            b64 = item.get("result")
-                            break
-                if not b64:
-                    for item in data.get("data", []):
-                        if item.get("type") == "image_result":
-                            b64 = item.get("b64_json")
-                            break
-                
-                if b64:
-                    if "base64," in b64: b64 = b64.split("base64,", 1)[1]
-                    return base64.b64decode(b64)
-                return "未找到图像数据"
-        except Exception as e: return str(e)
+        max_retry = self.conf.get("provider_max_retry", 10)
+        last_err = "未知错误"
+
+        for i in range(max_retry):
+            api_key = await self._get_api_key()
+            if not api_key: return "配置错误: 无 API Key"
+
+            try:
+                async with self.iwf.session.post(api_url, json=payload, headers={"Authorization": f"Bearer {api_key}"}, proxy=self.iwf.proxy) as resp:
+                    data = await resp.json()
+                    if resp.status != 200:
+                        last_err = f"API错误: {data}"
+                    else:
+                        b64 = None
+                        if data.get("object") == "response":
+                            for item in data.get("output", []):
+                                if item.get("type") == "image_generation_call":
+                                    b64 = item.get("result")
+                                    break
+                        if not b64:
+                            for item in data.get("data", []):
+                                if item.get("type") == "image_result":
+                                    b64 = item.get("b64_json")
+                                    break
+                        
+                        if b64:
+                            if "base64," in b64: b64 = b64.split("base64,", 1)[1]
+                            return base64.b64decode(b64)
+                        last_err = "未找到图像数据"
+            except Exception as e: last_err = str(e)
+
+            # 随机退避重试
+            backoff_time = 2 + random.uniform(1, 4)
+            if "429" in str(last_err): backoff_time += 5
+            await asyncio.sleep(backoff_time)
+
+        return f"OpenAI Responses 生成失败: {last_err}"
 
     async def _call_vertex_ai_anonymous_api(self, image_bytes_list: List[bytes], prompt: str) -> Union[bytes, str]:
+        # [Hardcoded] 强制每次请求前销毁旧会话，确保使用新指纹和新连接
+        await self.close()
+
         model_name = self.conf.get("model", "gemini-3-pro-image-preview")
             
         parts = [{"text": prompt}]
@@ -231,7 +288,7 @@ class ImageGenAPI:
             "variables": context,
         }
 
-        max_retry = self.conf.get("vertex_ai_max_retry", 10)
+        max_retry = self.conf.get("provider_max_retry", 10)
         recaptcha_base = self.conf.get("recaptcha_base_api", "https://www.google.com")
         vertex_base = self.conf.get("vertex_ai_base_api", "https://cloudconsole-pa.clients6.google.com")
         api_timeout = self.conf.get("api_timeout", 180)
@@ -241,6 +298,7 @@ class ImageGenAPI:
             token = await self._get_recaptcha_token(recaptcha_base)
             if not token:
                 last_err = "获取 recaptcha token 失败"
+                await self.close()
                 continue
             
             body["variables"]["recaptchaToken"] = token
@@ -263,6 +321,7 @@ class ImageGenAPI:
                         if resp.status_code == 429:
                             last_err = "API返回错误: 频率限制 (Resource exhausted)"
                         logger.warning(f"Vertex AI API error detail (Status {resp.status_code}): {resp.text[:500]}")
+                        await self.close() # [Fix] 状态码异常，销毁脏会话，强制下次重试建立新连接
                         continue
                     
                     result = resp.json()
@@ -285,6 +344,7 @@ class ImageGenAPI:
                                     last_err = f"生成中断: {candidate.get('finishReason')}"
                 except Exception as e:
                     last_err = f"curl_cffi 请求异常: {str(e)}"
+                    await self.close() # [Fix] 网络层异常(如curl 56)，销毁脏会话，强制下次重试建立新连接
             else:
                 # 回退到 aiohttp 逻辑 (保持基本的指纹优化)
                 headers = {
@@ -377,6 +437,7 @@ class ImageGenAPI:
                 if match: return match.group(1)
         except Exception as e:
             logger.error(f"curl_cffi 获取 recaptcha token 异常: {str(e)}")
+            await self.close() # [Fix] Token 获取失败也重置会话
         return None
 
     async def _get_recaptcha_token(self, base_url: str) -> Optional[str]:

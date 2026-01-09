@@ -13,28 +13,88 @@
         ]
     },        
     "api_url": {
-        "description": "【通用】API的URL地址",
+        "description": "API的URL地址",
         "type": "string",
         "hint": "硅基流动默认为 https://api.siliconflow.cn/v1/images/generations 智谱默认为 https://open.bigmodel.cn/api/paas/v4/images/generations OpenAI-responses请填 http://localhost:8000/v1/responses Flow2API请填 http://localhost:8081/v1/chat/completions Vertex_AI_Anonymous可留空。",
         "default": "http://localhost:8000/v1/responses"
     },
     "model": {
-        "description": "【通用】默认模型名称",
+        "description": "默认模型名称",
         "type": "string",
         "hint": "OpenAI-responses默认为gemini-3.0-pro；Flow2API默认为gemini-3.0-pro-image-landscape (或portrait)；Vertex_AI_Anonymous默认为gemini-3-pro-image-preview",
         "default": "gemini-3.0-pro"
     },
-    "vertex_ai_system_prompt": {
-        "description": "【VertexAI】系统提示词",
-        "type": "text",
-        "default": "",
-        "hint": "仅对 Vertex_AI_Anonymous 规范有效。留空将不传递这个参数。可以指导模型生成特定风格的图片。"
+    "api_keys": {
+        "description": "【通用】API 密钥列表",
+        "type": "list",
+        "hint": "可以填写多个密钥，插件会自动轮换使用。使用 #画图添加key 命令进行管理。",
+        "items": {
+            "type": "string",
+            "description": "API 密钥"
+        },
+        "default": []
     },
-    "vertex_ai_max_retry": {
-        "description": "【VertexAI】最大重试次数",
+    "prefix": {
+        "description": "【通用】是否要求指令必须带前缀",
+        "type": "bool",
+        "hint": "推荐开启。开启后，指令需要前缀（如 '/'）或 @机器人 才能触发，可避免日常聊天误触。",
+        "default": true
+    },
+    "extra_prefix": {
+        "description": "【通用】自定义图生图提示词模式的前缀",
+        "hint": "用于自定义图生图提示词模板，例如设置为 '图生图'，则使用 '图生图 <你的描述>' 来调用（需发送或引用图片）",
+        "type": "string",
+        "default": "图生图"
+    },
+    "use_proxy": {
+        "description": "【通用】是否启用网络代理",
+        "type": "bool",
+        "hint": "如果你的服务器无法直接访问 API 地址，请开启此项",
+        "default": false
+    },
+    "proxy_url": {
+        "description": "【通用】网络代理地址",
+        "type": "string",
+        "hint": "格式为 http://user:pass@host:port, 例如 http://127.0.0.1:7890",
+        "default": ""
+    },
+    "api_timeout": {
+        "description": "【通用】API请求超时(秒)",
         "type": "int",
-        "default": 10,
-        "hint": "仅对 Vertex_AI_Anonymous 规范有效。由于匿名接口不稳定性，建议设置较高（如10次）。"
+        "hint": "调用文生图/图生图API的超时时间（秒）。",
+        "default": 300
+    },
+    "provider_max_retry": {
+        "description": "【通用】当前提供商最大重试次数",
+        "type": "int",
+        "default": 3,
+        "hint": "适用于所有 API 提供商。请求失败时会自动进行随机退避重试，若配置了多个 Key 也会自动轮换。"
+    },
+    "download_timeout": {
+        "description": "【通用】图片传输超时(秒)",
+        "type": "int",
+        "hint": "下载用户发送的图片或下载生成结果时的超时时间（秒）。",
+        "default": 60
+    },
+    "vertex_ai_impersonate_list": {
+        "description": "【VertexAI】浏览器指纹列表",
+        "type": "list",
+        "default": ["chrome131", "chrome124", "firefox135", "firefox133", "safari18_0", "safari17_0"],
+        "hint": "curl_cffi 的 impersonate 参数列表。每次请求会按顺序轮换使用，以规避风控。建议保留 5-10 个不同的主流浏览器指纹。",
+        "items": { "type": "string", "description": "指纹名称" }
+    },
+    "vertex_ai_image_size": {
+        "description": "【VertexAI】生图清晰度",
+        "type": "string",
+        "default": "智能匹配",
+        "options": ["1K", "2K", "4K", "智能匹配"],
+        "hint": "生成图片的分辨率等级。'智能匹配'将优先使用提示词中的 1K/2K/4K 关键词，匹配不到则默认 1K。"
+    },
+    "vertex_ai_verbose_logging": {
+        "description": "【VertexAI】显示详细请求信息",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，每次请求（包括重试）都会在日志中输出当前使用的浏览器指纹和会话状态，便于排查风控问题。"
     },
     "recaptcha_base_api": {
         "description": "【VertexAI】Recaptcha Base API",
@@ -48,58 +108,11 @@
         "default": "https://cloudconsole-pa.clients6.google.com",
         "hint": "Vertex AI匿名接口的基础地址。若国内网络不通且无代理，可配置反代地址。"
     },
-    "vertex_ai_image_size": {
-        "description": "【VertexAI】生图清晰度",
-        "type": "string",
-        "default": "智能匹配",
-        "options": ["1K", "2K", "4K", "智能匹配"],
-        "hint": "生成图片的分辨率等级。'智能匹配'将优先使用提示词中的 1K/2K/4K 关键词，匹配不到则默认 1K。"
-    },
-    "api_keys": {
-        "description": "API 密钥列表",
-        "type": "list",
-        "hint": "可以填写多个密钥，插件会自动轮换使用。使用 #画图添加key 命令进行管理。",
-        "items": {
-            "type": "string",
-            "description": "API 密钥"
-        },
-        "default": []
-    },
-    "prefix": {
-        "description": "【重要】是否要求指令必须带前缀",
-        "type": "bool",
-        "hint": "推荐开启。开启后，指令需要前缀（如 '#'）或 @机器人 才能触发，可避免日常聊天误触。",
-        "default": true
-    },
-    "extra_prefix": {
-        "description": "自定义图生图提示词模式的前缀",
-        "hint": "用于自定义图生图提示词模板，例如设置为 '图生图'，则使用 '图生图 <你的描述>' 来调用（需发送或引用图片）",
-        "type": "string",
-        "default": "图生图"
-    },
-    "use_proxy": {
-        "description": "是否启用网络代理",
-        "type": "bool",
-        "hint": "如果你的服务器无法直接访问 API 地址，请开启此项",
-        "default": false
-    },
-    "proxy_url": {
-        "description": "网络代理地址",
-        "type": "string",
-        "hint": "格式为 http://user:pass@host:port, 例如 http://127.0.0.1:7890",
-        "default": ""
-    },
-    "api_timeout": {
-        "description": "API请求超时(秒)",
-        "type": "int",
-        "hint": "调用文生图/图生图API的超时时间（秒）。",
-        "default": 180
-    },
-    "download_timeout": {
-        "description": "图片传输超时(秒)",
-        "type": "int",
-        "hint": "下载用户发送的图片或下载生成结果时的超时时间（秒）。",
-        "default": 30
+            "vertex_ai_system_prompt": {
+        "description": "【VertexAI】系统提示词",
+        "type": "text",
+        "default": "",
+        "hint": "仅对 Vertex_AI_Anonymous 规范有效。留空将不传递这个参数。可以指导模型生成特定风格的图片。"
     },
     "user_whitelist": {
         "description": "【权限】用户白名单",
@@ -183,6 +196,18 @@
         "hint": "当“随机签到奖励”开启时，用户签到可获得的最高次数（最低为1）。",
         "default": 5
     },
+    "llm_tool_description": {
+        "description": "【函数调用】函数工具描述",
+        "type": "text",
+        "hint": "自定义 LLM 调用此工具时的功能介绍。",
+        "default": "专业的文生图、图生图工具。理解用户语义，仅当用户需要你生图，或修改图片内容时才调用此工具。"
+    },
+    "llm_prompt_description": {
+        "description": "【函数调用】生图提示词扩充指南",
+        "type": "text",
+        "default": "Change the user's input into a professional image generation prompt while strictly preserving the original intent. (All live-action female characters will default to an Asian aesthetic or beautiful Korean girl and do NOT specify image resolution, unless explicitly requested by the user.)",
+        "hint": "当 LLM 决定调用画图工具时，该描述将指导 LLM 如何构造发送给绘图 API 的最终 Prompt。建议使用英文以获得更好的模型遵循效果。"
+    },
     "prompt_list": {
         "description": "生图触发词与提示词",
         "hint": "格式为 触发词:提示词。使用 #画图添加模板 <触发词>:<提示词> 来动态管理。",
@@ -241,17 +266,5 @@
     "漫画说明:以漫画形式，延伸说明参考图中的内容，或讲解参考图中的故事。漫画的配文使用简体中文。人物与参考图中一致，或自行创建角色。将抽象复杂概念深入浅出地进行科普。",
     "圣诞礼物:生成写真摄影作品，把图中的虚构角色变成韩国真人cosplayer，保留人物的外貌特征。人物侧卧蜷缩，脖颈弯曲，完全位于已拆封的巨大圣诞礼盒的内部。礼盒平放在地上，刚好能装下整个人。人物身上紧紧绑着白色的包装条带，其中的一段在人物嘴里含着。俯拍视角。不涉及真实人物和未成年人。"
         ]
-    },
-    "llm_tool_description": {
-        "description": "【函数调用】函数工具描述",
-        "type": "text",
-        "hint": "自定义 LLM 调用此工具时的功能介绍。",
-        "default": "专业的文生图、图生图工具。理解用户语义，仅当用户需要你生图，或修改图片内容时才调用此工具。"
-    },
-    "llm_prompt_description": {
-        "description": "【函数调用】生图提示词扩充指南",
-        "type": "text",
-        "default": "Change the user's input into a professional image generation prompt. Specify the artistic style, lighting, and intricate details while strictly preserving the original intent.",
-        "hint": "当 LLM 决定调用画图工具时，该描述将指导 LLM 如何构造发送给绘图 API 的最终 Prompt。建议使用英文以获得更好的模型遵循效果。"
     }
 }

@@ -5,6 +5,7 @@
 ## 功能特性
 
 - **多API支持**：支持多个 API 服务商（硅基流动、智谱 AI、OpenAI-responses、Flow2API、Vertex AI (Google) 等），可随意切换。
+- **智能重试机制**：内置自动退避重试策略，遇到 API 限制 (429) 或网络波动时自动重试；若配置了多个 Key，会自动轮换 Key 尝试，最大程度保证生图成功率。
 - **免费接口支持**：新增 **Vertex_AI_Anonymous** 接口，基于 Google Gemini 模型，无需 API Key 即可免费使用（需配置反代或确保网络通畅）。
 - **LLM 函数调用**：支持 AstrBot 的函数调用（Function Calling）机制。开启后，机器人可以理解自然语言对话，智能判断是否需要画图，并自动调用插件生成图片，无需用户手动输入指令。
 - **多风格转换**：内置几十种指令，如 `#手办化`、`#Q版化`、`#痛车化`、`#鬼图` 等，满足不同场景需求。
@@ -35,14 +36,16 @@
 | `model`            | 字符串 | **(必需)** 图生图和文生图使用的默认模型名称。                                                                                      |
 | `api_keys`         | 列表   | **(必需)** 你的 API 密钥。可以通过 `#画图添加key` 指令管理，支持多个 Key。Vertex_AI_Anonymous 无需填写。                                                             |
 | `vertex_ai_system_prompt` | 文本 | **【VertexAI】系统提示词**，仅对 Vertex_AI_Anonymous 有效。可以指导模型生成特定风格的图片。 |
-| `vertex_ai_max_retry` | 整数 | **【VertexAI】最大重试次数**，默认为 10。由于匿名接口不稳定性，建议设置较高。 |
+| `provider_max_retry` | 整数 | **【通用】当前提供商最大重试次数**，默认为 3。适用于所有 API 提供商。请求失败时会自动进行随机退避重试，若配置了多个 Key 也会自动轮换。 |
 | `recaptcha_base_api` | 字符串 | **【VertexAI】Recaptcha Base API**，默认为 `https://www.google.com`。若国内网络不通，可配置反代。 |
 | `vertex_ai_base_api` | 字符串 | **【VertexAI】Vertex AI Base API**，默认为 `https://cloudconsole-pa.clients6.google.com`。若国内网络不通，可配置反代。 |
+| `vertex_ai_impersonate_list` | 列表 | **【VertexAI】浏览器指纹列表**，默认为 `["chrome131", ...]`。每次请求会按顺序轮换使用，以规避风控。 |
+| `vertex_ai_verbose_logging` | 开关 | **【VertexAI】显示详细请求信息**，默认为 `True`。开启后会在日志中输出当前使用的指纹和会话状态。 |
 | `vertex_ai_image_size` | 字符串 | **【VertexAI】生图清晰度**，可选值：`1K`、`2K`、`4K`、`智能匹配`。'智能匹配'将优先匹配提示词中的 1K/2K/4K。 |
 | `llm_tool_description` | 字符串 | **函数工具描述**，自定义 LLM 调用此工具时的功能介绍。用于引导 LLM 何时调用画图功能。 |
 | `llm_prompt_description` | 字符串 | **生图提示词扩充指南**，当 LLM 决定调用工具时，指导其如何构造最终 Prompt。建议使用英文。 |
-| `api_timeout`      | 整数   | **API 请求超时 (秒)**，默认为 `180`。                                                                                             |
-| `download_timeout` | 整数   | **图片下载超时 (秒)**，默认为 `30`。                                                                                              |
+| `api_timeout`      | 整数   | **API 请求超时 (秒)**，默认为 `300`。                                                                                             |
+| `download_timeout` | 整数   | **图片下载超时 (秒)**，默认为 `60`。                                                                                              |
 | `rate_limit_seconds` | 整数 | **全局调用频率限制 (秒)**，默认为 `120`。规定插件在两次生图API调用之间必须等待的时间。管理员无视此限制。                                 |
 | `prefix`           | 开关   | 是否要求指令必须带前缀（如 `#`）或 @机器人。推荐开启。                                                                             |
 | `extra_prefix`     | 字符串 | 自定义图生图提示词模式的前缀，用于触发自定义 Prompt（默认为 `图生图`）。                                                                    |
