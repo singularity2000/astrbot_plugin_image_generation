@@ -191,7 +191,25 @@ class ImageGenerationPlugin(Star):
         if not display_name:
             display_name = prompt[:20] + '...' if len(prompt) > 20 else prompt
         
-        yield event.plain_result(f"🎨 收到{'图生图' if is_i2i else '文生图'}请求，正在生成 [{display_name}]...")
+        concise_mode = self.conf.get("concise_mode", False)
+        start_msg = f"🎨 收到{'图生图' if is_i2i else '文生图'}请求，正在生成 [{display_name}]..."
+
+        if concise_mode:
+            logger.info(start_msg)
+            # 尝试贴表情 (ID 124: OK)
+            try:
+                bot = getattr(event, "bot", None)
+                if not bot:
+                    provider = self.context.get_using_provider(event.unified_msg_origin)
+                    if provider and hasattr(provider, "bot"):
+                        bot = provider.bot
+                
+                if bot and hasattr(bot, "set_msg_emoji_like"):
+                    await bot.set_msg_emoji_like(message_id=event.message_obj.message_id, emoji_id=124, set=True)
+            except Exception as e:
+                logger.debug(f"简洁模式贴表情失败: {e}")
+        else:
+            yield event.plain_result(start_msg)
 
         # --- API 调用 ---
         start_time = datetime.now()
@@ -211,7 +229,12 @@ class ImageGenerationPlugin(Star):
                 if self.conf.get("enable_group_limit", False) and group_id: 
                     caption_parts.append(f"本群剩余次数: {self.persistence.get_group_count(group_id)}")
             
-            yield event.chain_result([Image.fromBytes(res), Plain(" | ".join(caption_parts))])
+            caption_text = " | ".join(caption_parts)
+            if concise_mode:
+                logger.info(caption_text)
+                yield event.chain_result([Image.fromBytes(res)])
+            else:
+                yield event.chain_result([Image.fromBytes(res), Plain(caption_text)])
         else:
             yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}")
 

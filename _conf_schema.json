@@ -46,6 +46,12 @@
         "type": "string",
         "default": "图生图"
     },
+    "concise_mode": {
+        "description": "【通用】简洁模式",
+        "type": "bool",
+        "hint": "开启后，收到请求时不回复文字而是贴“OK”表情（需平台支持），生成成功后仅发送图片不带文字说明。生成失败仍会提示。",
+        "default": false
+    },
     "use_proxy": {
         "description": "【通用】是否启用网络代理",
         "type": "bool",

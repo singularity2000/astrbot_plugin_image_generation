@@ -132,10 +132,8 @@ class ImageGenAPI:
             except Exception as e:
                 last_err = f"错误: {e}"
             
-            # 随机退避重试
-            backoff_time = 2 + random.uniform(1, 4)
-            if "429" in str(last_err): backoff_time += 5
-            await asyncio.sleep(backoff_time)
+            # 付费API使用固定短间隔重试，无需拟人化抖动
+            await asyncio.sleep(1)
             
         return f"API请求失败: {last_err}"
 
@@ -178,10 +176,8 @@ class ImageGenAPI:
                         last_err = "未找到图片URL"
             except Exception as e: last_err = str(e)
 
-            # 随机退避重试
-            backoff_time = 2 + random.uniform(1, 4)
-            if "429" in str(last_err): backoff_time += 5
-            await asyncio.sleep(backoff_time)
+            # 付费API使用固定短间隔重试
+            await asyncio.sleep(1)
 
         return f"Flow2API 生成失败: {last_err}"
 
@@ -231,10 +227,8 @@ class ImageGenAPI:
                         last_err = "未找到图像数据"
             except Exception as e: last_err = str(e)
 
-            # 随机退避重试
-            backoff_time = 2 + random.uniform(1, 4)
-            if "429" in str(last_err): backoff_time += 5
-            await asyncio.sleep(backoff_time)
+            # 付费API使用固定短间隔重试
+            await asyncio.sleep(1)
 
         return f"OpenAI Responses 生成失败: {last_err}"
 
@@ -394,7 +388,7 @@ class ImageGenAPI:
             
             logger.warning(f"Vertex AI API 调用失败，重试 ({i+1}/{max_retry}): {last_err}")
             # 引入随机退避重试，模拟真人行为
-            backoff_time = 2 + random.uniform(1, 4)
+            backoff_time = 2 + random.uniform(0, 3)
             if "Resource exhausted" in last_err:
                 backoff_time += 5 # 遇到 429 额外多等一会儿
             await asyncio.sleep(backoff_time)
@@ -406,13 +400,16 @@ class ImageGenAPI:
         session = await self._get_curl_session()
         if not session: return None
         
+        # [优化] 添加 Referer 模拟真实浏览器在控制台页面加载 iframe 的行为
+        headers = {"Referer": "https://console.cloud.google.com/"}
+
         try:
             for _ in range(3):
                 cb = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
                 anchor_url = f"{base_url}/recaptcha/enterprise/anchor?ar=1&k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj&co=aHR0cHM6Ly9jb25zb2xlLmNsb3VkLmdvb2dsZS5jb206NDQz&hl=zh-CN&v=jdMmXeCQEkPbnFDy9T04NbgJ&size=invisible&anchor-ms=20000&execute-ms=15000&cb={cb}"
                 
                 # 1. GET Anchor
-                resp = await session.get(anchor_url)
+                resp = await session.get(anchor_url, headers=headers)
                 if resp.status_code != 200: continue
                 
                 soup = BeautifulSoup(resp.text, "html.parser")
@@ -430,7 +427,10 @@ class ImageGenAPI:
                     "vh": "6581054572", "chr": "", "bg": "",
                 }
                 
-                resp = await session.post(reload_url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"})
+                resp = await session.post(reload_url, data=payload, headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    **headers
+                })
                 if resp.status_code != 200: continue
                 
                 match = re.search(r'rresp","(.*?)"', resp.text)
