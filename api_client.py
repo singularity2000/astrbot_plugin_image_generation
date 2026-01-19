@@ -27,6 +27,7 @@ class ImageGenAPI:
         self.api_call_lock = asyncio.Lock()
         self.impersonate_index = 0
         self.last_api_call_time: Optional[datetime] = None
+        self.request_count = 0
         
         self.form = {"siliconflow": "images", "bigmodel": "data"}
         self.data_form = self.form.get(self.conf.get("api_from"), "images")
@@ -233,8 +234,12 @@ class ImageGenAPI:
         return f"OpenAI Responses 生成失败: {last_err}"
 
     async def _call_vertex_ai_anonymous_api(self, image_bytes_list: List[bytes], prompt: str) -> Union[bytes, str]:
-        # [Hardcoded] 强制每次请求前销毁旧会话，确保使用新指纹和新连接
-        await self.close()
+        # [优化] 会话老化机制：成功请求50次后主动轮换，防止长连接特征被标记
+        if self.request_count >= 50:
+            if self.conf.get("vertex_ai_verbose_logging", True):
+                logger.info("[VertexAI] 会话老化 (50次请求)，主动销毁并轮换指纹")
+            await self.close()
+            self.request_count = 0
 
         model_name = self.conf.get("model", "gemini-3-pro-image-preview")
             
@@ -303,8 +308,9 @@ class ImageGenAPI:
                 try:
                     # 仅保留最基础的业务 Headers，指纹相关 Headers 由 impersonate 自动接管
                     headers = {
-                        "referer": "https://console.cloud.google.com/", 
+                        "referer": "https://console.cloud.google.com/vertex-ai", 
                         "Content-Type": "application/json",
+                        "Origin": "https://console.cloud.google.com",
                     }
                     session = await self._get_curl_session()
                     resp = await session.post(url, json=body, headers=headers, timeout=api_timeout)
@@ -314,8 +320,12 @@ class ImageGenAPI:
                         # 识别 429
                         if resp.status_code == 429:
                             last_err = "API返回错误: 频率限制 (Resource exhausted)"
-                        logger.warning(f"Vertex AI API error detail (Status {resp.status_code}): {resp.text[:500]}")
-                        await self.close() # [Fix] 状态码异常，销毁脏会话，强制下次重试建立新连接
+                            # [优化] 429 不销毁会话，保留连接以减少握手开销，仅触发退避
+                            logger.warning(f"Vertex AI 429 Limited. Retrying with backoff...")
+                        else:
+                            # 其他错误 (403, 500) 销毁会话
+                            logger.warning(f"Vertex AI API error detail (Status {resp.status_code}): {resp.text[:500]}")
+                            await self.close() 
                         continue
                     
                     result = resp.json()
@@ -333,6 +343,7 @@ class ImageGenAPI:
                                         if "inlineData" in part and part["inlineData"].get("data"):
                                             img_data = part["inlineData"]["data"]
                                             logger.info(f"Successfully extracted image data ({len(img_data)} chars)")
+                                            self.request_count += 1
                                             return base64.b64decode(img_data)
                                 elif candidate.get("finishReason"):
                                     last_err = f"生成中断: {candidate.get('finishReason')}"
@@ -342,7 +353,7 @@ class ImageGenAPI:
             else:
                 # 回退到 aiohttp 逻辑 (保持基本的指纹优化)
                 headers = {
-                    "referer": "https://console.cloud.google.com/", 
+                    "referer": "https://console.cloud.google.com/vertex-ai", 
                     "Content-Type": "application/json",
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                     "Origin": "https://console.cloud.google.com",
@@ -401,7 +412,7 @@ class ImageGenAPI:
         if not session: return None
         
         # [优化] 添加 Referer 模拟真实浏览器在控制台页面加载 iframe 的行为
-        headers = {"Referer": "https://console.cloud.google.com/"}
+        headers = {"Referer": "https://console.cloud.google.com/vertex-ai"}
 
         try:
             for _ in range(3):
@@ -429,6 +440,7 @@ class ImageGenAPI:
                 
                 resp = await session.post(reload_url, data=payload, headers={
                     "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://console.cloud.google.com",
                     **headers
                 })
                 if resp.status_code != 200: continue

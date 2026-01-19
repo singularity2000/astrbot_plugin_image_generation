@@ -3,10 +3,8 @@ import random
 import re
 from datetime import datetime
 from typing import Dict, Optional
-from dataclasses import dataclass, field
 
 from astrbot import logger
-from astrbot.api import FunctionTool
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
@@ -16,50 +14,6 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from .persistence import PersistenceManager
 from .workflow import ImageWorkflow
 from .api_client import ImageGenAPI
-
-@dataclass
-class ImageGenTool(FunctionTool):
-    name: str = "image_generation"
-    description: str = ""
-    parameters: dict = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {
-            "prompt": {
-                "type": "string",
-                "description": "The detailed prompt for image generation. Expand the user's request into a professional prompt including style, lighting, and details.",
-            }
-        },
-        "required": ["prompt"],
-    })
-    plugin: object = field(default=None, repr=False)
-
-    async def run(self, event: AstrMessageEvent, prompt: str):
-        # 检测是否包含图片组件（直接发送或引用）
-        has_direct_image = False
-        for seg in event.message_obj.message:
-            if isinstance(seg, Image):
-                has_direct_image = True
-                break
-            if isinstance(seg, Reply) and seg.chain:
-                if any(isinstance(s, Image) for s in seg.chain):
-                    has_direct_image = True
-                    break
-        
-        # 智能决策：有图则图生图，无图则文生图
-        is_i2i = has_direct_image
-
-        # 1. 异步启动后台任务，避免阻塞 LLM 导致超时
-        asyncio.create_task(self._run_background_gen(event, prompt, is_i2i))
-        
-        # 2. 停止事件传播，阻止 LLM 继续生成回复
-        event.stop_event()
-
-    async def _run_background_gen(self, event: AstrMessageEvent, prompt: str, is_i2i: bool):
-        try:
-            async for result in self.plugin.handle_image_gen_logic(event, prompt, is_i2i=is_i2i):
-                await event.send(result)
-        except Exception as e:
-            logger.error(f"Background image generation failed: {e}")
 
 @register(
     "astrbot_plugin_image_generation",
@@ -85,19 +39,21 @@ class ImageGenerationPlugin(Star):
         await self.persistence.load_all()
         await self._load_prompt_map()
         
-        # 实例化工具并动态注入配置描述
-        image_gen_tool = ImageGenTool(
-            plugin=self,
-            description=self.conf.get("llm_tool_description", "这是一个高级图片生成工具。主要功能为文生图、图生图。理解用户意图，仅当用户需要你画图，或修改图片内容时，才调用此工具，并智能决定调用文生图还是图生图。你可以根据用户的描述 and 意图对提示词进行扩充，使其更加详细（例如扩充为包含风格、光影、细节的专业提示词）。")
-        )
-        
-        custom_prompt_desc = self.conf.get(
-            "llm_prompt_description",
-            "Change the user's input into a professional image generation prompt. Specify the artistic style, lighting, and intricate details while strictly preserving the original intent."
-        )
-        image_gen_tool.parameters["properties"]["prompt"]["description"] = custom_prompt_desc
-        
-        self.context.add_llm_tools(image_gen_tool)
+        # 获取自动注册的工具实例并动态更新描述（保留自定义描述功能）
+        tool = self.context.get_llm_tool_manager().get_func("image_generation")
+        if tool:
+            tool.description = self.conf.get(
+                "llm_tool_description", 
+                "专业的文生图、图生图工具。理解用户语义，仅当用户需要你生图，或修改图片内容时才调用此工具。"
+            )
+            
+            custom_prompt_desc = self.conf.get(
+                "llm_prompt_description",
+                "Change the user's input into a professional image generation prompt while strictly preserving the original intent."
+            )
+            if "properties" in tool.parameters and "prompt" in tool.parameters["properties"]:
+                tool.parameters["properties"]["prompt"]["description"] = custom_prompt_desc
+
         logger.info("astrbot_plugin_image_generation 插件已加载")
 
     async def _load_prompt_map(self):
@@ -114,6 +70,40 @@ class ImageGenerationPlugin(Star):
             except ValueError:
                 logger.warning(f"跳过格式错误的 prompt: {item}")
         logger.info(f"加载了 {len(self.prompt_map)} 个 prompts。")
+
+    @filter.llm_tool(name="image_generation")
+    async def image_generation(self, event: AstrMessageEvent, prompt: str):
+        """专业的文生图、图生图工具。理解用户语义，仅当用户需要你生图，或修改图片内容时才调用此工具。
+
+        Args:
+            prompt(string): Change the user's input into a professional image generation prompt while strictly preserving the original intent.
+        """
+        # 检测是否包含图片组件（直接发送或引用）
+        has_direct_image = False
+        for seg in event.message_obj.message:
+            if isinstance(seg, Image):
+                has_direct_image = True
+                break
+            if isinstance(seg, Reply) and seg.chain:
+                if any(isinstance(s, Image) for s in seg.chain):
+                    has_direct_image = True
+                    break
+        
+        # 智能决策：有图则图生图，无图则文生图
+        is_i2i = has_direct_image
+
+        # 异步启动后台任务，避免阻塞 LLM 导致超时
+        async def _run_background_gen():
+            try:
+                async for result in self.handle_image_gen_logic(event, prompt, is_i2i=is_i2i):
+                    await event.send(result)
+            except Exception as e:
+                logger.error(f"Background image generation failed: {e}")
+
+        asyncio.create_task(_run_background_gen())
+        
+        # 停止事件传播，阻止 LLM 继续生成回复
+        event.stop_event()
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=5)
     async def on_image_gen_request(self, event: AstrMessageEvent):
@@ -191,7 +181,7 @@ class ImageGenerationPlugin(Star):
         if not display_name:
             display_name = prompt[:20] + '...' if len(prompt) > 20 else prompt
         
-        concise_mode = self.conf.get("concise_mode", False)
+        concise_mode = self.conf.get("concise_mode", False) and bool(group_id)
         start_msg = f"🎨 收到{'图生图' if is_i2i else '文生图'}请求，正在生成 [{display_name}]..."
 
         if concise_mode:
@@ -232,7 +222,7 @@ class ImageGenerationPlugin(Star):
             caption_text = " | ".join(caption_parts)
             if concise_mode:
                 logger.info(caption_text)
-                yield event.chain_result([Image.fromBytes(res)])
+                yield event.chain_result([Reply(id=event.message_obj.message_id), Image.fromBytes(res)])
             else:
                 yield event.chain_result([Image.fromBytes(res), Plain(caption_text)])
         else:
