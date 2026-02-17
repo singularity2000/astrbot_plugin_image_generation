@@ -1,38 +1,280 @@
 {
-    "api_from": {
-        "description": "API来源选择",
-        "hint": "选择你所使用的API服务商{siliconflow:硅基流动, bigmodel:智谱AI, OpenAI-responses:OpenAI}",
-        "type": "string",
-        "default": "OpenAI-responses",
-        "options": [
-          "siliconflow",
-          "bigmodel",
-          "OpenAI-responses",
-          "Flow2API",
-          "Vertex_AI_Anonymous"
-        ]
-    },        
-    "api_url": {
-        "description": "API的URL地址",
-        "type": "string",
-        "hint": "硅基流动默认为 https://api.siliconflow.cn/v1/images/generations 智谱默认为 https://open.bigmodel.cn/api/paas/v4/images/generations OpenAI-responses请填 http://localhost:8000/v1/responses Flow2API请填 http://localhost:8081/v1/chat/completions Vertex_AI_Anonymous可留空。",
-        "default": "http://localhost:8000/v1/responses"
-    },
-    "model": {
-        "description": "默认模型名称",
-        "type": "string",
-        "hint": "OpenAI-responses默认为gemini-3.0-pro；Flow2API默认为gemini-3.0-pro-image-landscape (或portrait)；Vertex_AI_Anonymous默认为gemini-3-pro-image-preview",
-        "default": "gemini-3.0-pro"
-    },
-    "api_keys": {
-        "description": "【通用】API 密钥列表",
-        "type": "list",
-        "hint": "可以填写多个密钥，插件会自动轮换使用。使用 #画图添加key 命令进行管理。",
-        "items": {
-            "type": "string",
-            "description": "API 密钥"
-        },
-        "default": []
+    "api_pipeline": {
+        "description": "API 管线（从上到下依次调用，成功即停止，失败则回退到下一个）",
+        "type": "template_list",
+        "hint": "点击【添加条目】选择 API 提供商。可添加多个并排列优先级，第一个成功即返回结果，失败自动回退到下一个。",
+        "templates": {
+            "vertex_ai_anonymous": {
+                "name": "Vertex AI 匿名 (逆向)",
+                "hint": "Vertex AI 匿名接口，无需 API Key，自带 Recaptcha 验证与浏览器指纹伪装",
+                "items": {
+                    "enabled": {
+                        "description": "启用此节点",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "关闭后此节点将被跳过"
+                    },
+                    "model": {
+                        "description": "模型名称",
+                        "type": "string",
+                        "default": "gemini-3-pro-image-preview",
+                        "hint": "Vertex AI 匿名接口使用的模型"
+                    },
+                    "image_size": {
+                        "description": "生图清晰度",
+                        "type": "string",
+                        "default": "智能匹配",
+                        "options": ["1K", "2K", "4K", "智能匹配"],
+                        "hint": "生成图片的分辨率等级。'智能匹配'将优先使用提示词中的 1K/2K/4K 关键词，匹配不到则默认 1K。"
+                    },
+                    "system_prompt": {
+                        "description": "系统提示词",
+                        "type": "text",
+                        "default": "",
+                        "hint": "留空将不传递这个参数。可以指导模型生成特定风格的图片。"
+                    },
+                    "impersonate_list": {
+                        "description": "浏览器指纹列表",
+                        "type": "list",
+                        "default": ["chrome131", "chrome124", "firefox135", "firefox133", "safari18_0", "safari17_0","safari260_ios"],
+                        "hint": "curl_cffi 的 impersonate 参数列表。每次请求会按顺序轮换使用，以规避风控。建议保留 5-10 个不同的主流浏览器指纹。",
+                        "items": { "type": "string", "description": "指纹名称" }
+                    },
+                    "verbose_logging": {
+                        "description": "显示详细请求信息",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "开启后，每次请求（包括重试）都会在日志中输出当前使用的浏览器指纹和会话状态，便于排查风控问题。"
+                    },
+                    "recaptcha_base_api": {
+                        "description": "Recaptcha Base API",
+                        "type": "string",
+                        "default": "https://www.google.com",
+                        "hint": "获取 Recaptcha 令牌的基础地址。若国内网络不通且无代理，可配置反代地址。"
+                    },
+                    "vertex_ai_base_api": {
+                        "description": "Vertex AI Base API",
+                        "type": "string",
+                        "default": "https://cloudconsole-pa.clients6.google.com",
+                        "hint": "Vertex AI 匿名接口的基础地址。若国内网络不通且无代理，可配置反代地址。"
+                    },
+                    "proxy": {
+                        "description": "网络代理",
+                        "type": "string",
+                        "default": "http://127.0.0.1:7890",
+                        "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
+                    },
+                    "max_retry": {
+                        "description": "最大重试次数",
+                        "type": "int",
+                        "default": 3,
+                        "hint": "本节点内请求失败时的最大重试次数（逆向接口建议较高值）"
+                    },
+                    "api_timeout": {
+                        "description": "API请求超时(秒)",
+                        "type": "int",
+                        "default": 120,
+                        "hint": "调用此节点 API 的超时时间（秒）"
+                    }
+                }
+            },
+            "openai_responses": {
+                "name": "OpenAI Responses",
+                "hint": "兼容 OpenAI /v1/responses 端点（如 Gemini 中转）",
+                "items": {
+                    "enabled": {
+                        "description": "启用此节点",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "关闭后此节点将被跳过"
+                    },
+                    "api_url": {
+                        "description": "API 地址",
+                        "type": "string",
+                        "default": "http://localhost:8000/v1/responses",
+                        "hint": "OpenAI Responses 端点地址"
+                    },
+                    "model": {
+                        "description": "模型名称",
+                        "type": "string",
+                        "default": "gemini-3.0-pro",
+                        "hint": "例如 gemini-3.0-pro"
+                    },
+                    "api_keys": {
+                        "description": "API 密钥列表",
+                        "type": "list",
+                        "default": [],
+                        "hint": "可填写多个密钥，自动轮换使用",
+                        "items": { "type": "string", "description": "API 密钥" }
+                    },
+                    "proxy": {
+                        "description": "网络代理",
+                        "type": "string",
+                        "default": "",
+                        "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
+                    },
+                    "max_retry": {
+                        "description": "最大重试次数",
+                        "type": "int",
+                        "default": 3,
+                        "hint": "本节点内请求失败时的最大重试次数"
+                    },
+                    "api_timeout": {
+                        "description": "API请求超时(秒)",
+                        "type": "int",
+                        "default": 120,
+                        "hint": "调用此节点 API 的超时时间（秒）"
+                    }
+                }
+            },
+            "siliconflow": {
+                "name": "硅基流动 (SiliconFlow)",
+                "hint": "硅基流动图像生成 API",
+                "items": {
+                    "enabled": {
+                        "description": "启用此节点",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "关闭后此节点将被跳过"
+                    },
+                    "api_url": {
+                        "description": "API 地址",
+                        "type": "string",
+                        "default": "https://api.siliconflow.cn/v1/images/generations",
+                        "hint": "硅基流动默认地址"
+                    },
+                    "model": {
+                        "description": "模型名称",
+                        "type": "string",
+                        "default": "",
+                        "hint": "硅基流动支持的模型名称"
+                    },
+                    "api_keys": {
+                        "description": "API 密钥列表",
+                        "type": "list",
+                        "default": [],
+                        "hint": "可填写多个密钥，自动轮换使用",
+                        "items": { "type": "string", "description": "API 密钥" }
+                    },
+                    "proxy": {
+                        "description": "网络代理",
+                        "type": "string",
+                        "default": "",
+                        "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
+                    },
+                    "max_retry": {
+                        "description": "最大重试次数",
+                        "type": "int",
+                        "default": 3,
+                        "hint": "本节点内请求失败时的最大重试次数"
+                    },
+                    "api_timeout": {
+                        "description": "API请求超时(秒)",
+                        "type": "int",
+                        "default": 120,
+                        "hint": "调用此节点 API 的超时时间（秒）"
+                    }
+                }
+            },
+            "bigmodel": {
+                "name": "智谱 AI (BigModel)",
+                "hint": "智谱 AI 图像生成 API",
+                "items": {
+                    "enabled": {
+                        "description": "启用此节点",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "关闭后此节点将被跳过"
+                    },
+                    "api_url": {
+                        "description": "API 地址",
+                        "type": "string",
+                        "default": "https://open.bigmodel.cn/api/paas/v4/images/generations",
+                        "hint": "智谱 AI 默认地址"
+                    },
+                    "model": {
+                        "description": "模型名称",
+                        "type": "string",
+                        "default": "",
+                        "hint": "智谱 AI 支持的模型名称"
+                    },
+                    "api_keys": {
+                        "description": "API 密钥列表",
+                        "type": "list",
+                        "default": [],
+                        "hint": "可填写多个密钥，自动轮换使用",
+                        "items": { "type": "string", "description": "API 密钥" }
+                    },
+                    "proxy": {
+                        "description": "网络代理",
+                        "type": "string",
+                        "default": "",
+                        "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
+                    },
+                    "max_retry": {
+                        "description": "最大重试次数",
+                        "type": "int",
+                        "default": 3,
+                        "hint": "本节点内请求失败时的最大重试次数"
+                    },
+                    "api_timeout": {
+                        "description": "API请求超时(秒)",
+                        "type": "int",
+                        "default": 120,
+                        "hint": "调用此节点 API 的超时时间（秒）"
+                    }
+                }
+            },
+            "flow2api": {
+                "name": "Flow2API",
+                "hint": "Flow2API 中转服务（兼容 Chat Completions 端点）",
+                "items": {
+                    "enabled": {
+                        "description": "启用此节点",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "关闭后此节点将被跳过"
+                    },
+                    "api_url": {
+                        "description": "API 地址",
+                        "type": "string",
+                        "default": "http://localhost:8081/v1/chat/completions",
+                        "hint": "Flow2API Chat Completions 端点地址"
+                    },
+                    "model": {
+                        "description": "模型名称",
+                        "type": "string",
+                        "default": "gemini-3.0-pro-image-landscape",
+                        "hint": "例如 gemini-3.0-pro-image-landscape 或 portrait"
+                    },
+                    "api_keys": {
+                        "description": "API 密钥列表",
+                        "type": "list",
+                        "default": [],
+                        "hint": "可填写多个密钥，自动轮换使用",
+                        "items": { "type": "string", "description": "API 密钥" }
+                    },
+                    "proxy": {
+                        "description": "网络代理",
+                        "type": "string",
+                        "default": "",
+                        "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
+                    },
+                    "max_retry": {
+                        "description": "最大重试次数",
+                        "type": "int",
+                        "default": 3,
+                        "hint": "本节点内请求失败时的最大重试次数"
+                    },
+                    "api_timeout": {
+                        "description": "API请求超时(秒)",
+                        "type": "int",
+                        "default": 120,
+                        "hint": "调用此节点 API 的超时时间（秒）"
+                    }
+                }
+            }
+        }
     },
     "prefix": {
         "description": "【通用】是否要求指令必须带前缀",
@@ -52,73 +294,11 @@
         "hint": "开启后，收到请求时不回复文字而是贴“OK”表情（仅适用于QQ群），生成成功后仅发送图片不带文字说明。生成失败仍会提示。私聊始终不使用简洁模式。",
         "default": false
     },
-    "use_proxy": {
-        "description": "【通用】是否启用网络代理",
-        "type": "bool",
-        "hint": "如果你的服务器无法直接访问 API 地址，请开启此项",
-        "default": false
-    },
-    "proxy_url": {
-        "description": "【通用】网络代理地址",
-        "type": "string",
-        "hint": "格式为 http://user:pass@host:port, 例如 http://127.0.0.1:7890",
-        "default": ""
-    },
-    "api_timeout": {
-        "description": "【通用】API请求超时(秒)",
-        "type": "int",
-        "hint": "调用文生图/图生图API的超时时间（秒）。",
-        "default": 300
-    },
-    "provider_max_retry": {
-        "description": "【通用】当前提供商最大重试次数",
-        "type": "int",
-        "default": 3,
-        "hint": "适用于所有 API 提供商。请求失败时会自动进行随机退避重试，若配置了多个 Key 也会自动轮换。"
-    },
     "download_timeout": {
         "description": "【通用】图片传输超时(秒)",
         "type": "int",
         "hint": "下载用户发送的图片或下载生成结果时的超时时间（秒）。",
         "default": 60
-    },
-    "vertex_ai_impersonate_list": {
-        "description": "【VertexAI】浏览器指纹列表",
-        "type": "list",
-        "default": ["chrome131", "chrome124", "firefox135", "firefox133", "safari18_0", "safari17_0"],
-        "hint": "curl_cffi 的 impersonate 参数列表。每次请求会按顺序轮换使用，以规避风控。建议保留 5-10 个不同的主流浏览器指纹。",
-        "items": { "type": "string", "description": "指纹名称" }
-    },
-    "vertex_ai_image_size": {
-        "description": "【VertexAI】生图清晰度",
-        "type": "string",
-        "default": "智能匹配",
-        "options": ["1K", "2K", "4K", "智能匹配"],
-        "hint": "生成图片的分辨率等级。'智能匹配'将优先使用提示词中的 1K/2K/4K 关键词，匹配不到则默认 1K。"
-    },
-    "vertex_ai_verbose_logging": {
-        "description": "【VertexAI】显示详细请求信息",
-        "type": "bool",
-        "default": true,
-        "hint": "开启后，每次请求（包括重试）都会在日志中输出当前使用的浏览器指纹和会话状态，便于排查风控问题。"
-    },
-    "recaptcha_base_api": {
-        "description": "【VertexAI】Recaptcha Base API",
-        "type": "string",
-        "default": "https://www.google.com",
-        "hint": "获取Recaptcha令牌的基础地址。若国内网络不通且无代理，可配置反代地址。"
-    },
-    "vertex_ai_base_api": {
-        "description": "【VertexAI】Vertex AI Base API",
-        "type": "string",
-        "default": "https://cloudconsole-pa.clients6.google.com",
-        "hint": "Vertex AI匿名接口的基础地址。若国内网络不通且无代理，可配置反代地址。"
-    },
-            "vertex_ai_system_prompt": {
-        "description": "【VertexAI】系统提示词",
-        "type": "text",
-        "default": "",
-        "hint": "仅对 Vertex_AI_Anonymous 规范有效。留空将不传递这个参数。可以指导模型生成特定风格的图片。"
     },
     "user_whitelist": {
         "description": "【权限】用户白名单",
@@ -164,7 +344,7 @@
         "description": "【次数限制】每用户每日固定额度",
         "type": "int",
         "hint": "每天0点重置的固定额度，与永久额度(签到、管理员给予)叠加。默认为0，即不启用。",
-        "default": 0
+        "default": 10
     },
     "group_daily_fixed_quota": {
         "description": "【次数限制】每群组每日固定额度",
@@ -175,8 +355,8 @@
     "rate_limit_seconds": {
         "description": "【频率限制】全局调用间隔（秒）",
         "type": "int",
-        "hint": "两次生图请求之间的最小全局冷却时间，单位为秒。管理员不受此限制。默认为120秒。",
-        "default": 120
+        "hint": "两次生图请求之间的最小全局冷却时间，单位为秒。管理员不受此限制。默认为30秒。",
+        "default": 30
     },
     "enable_checkin": {
         "description": "【签到系统】是否开启每日签到功能",
@@ -257,7 +437,7 @@
     "多机位:生成这张图片的正脸特写、侧身照、远景、背影的四种多机位镜头，然后整合输出到一张照片里，保持人物高度的一致性，适合生成连续剧情感镜头",
     "电影分镜:Use the characters from this image, create a nine-panel grid image, depicting a deeply moving romantic love movie with shocking elements. The story should feature accidental highs and lows, concluding with a brilliant twist and climax. Ensure a logical connection between all 9 film stills (read from left to right, top to bottom). Do not include any text descriptions. Do maintain the character's appearance consistent with the reference image.",
     "动漫分镜:According to the content of the picture to generate nine frames of comics, with pictures and lenses to tell a story.",
-    "真人化:in Studio, solid color gradient background, Asian cosplayer(s) precisely recreating all character(s), outfits, and poses from the reference image. enhanced with film grain for a gritty, authentic particle effect reminiscent of 35mm film stock; 8K ultra-HD, sharp and believable, no abstraction",
+    "真人化:把图中角色变成现实生活中的真人，人物的头-身比例必须符合真人(可缩小头部）。姿势保持不变。角色默认生成为韩国审美，除非你很确定原图中的人不是亚洲人。实拍，去除人物的漫画与CG质感。",
     "真人化2:A photorealistic RAW photograph captured with a DSLR camera, showing Korean cosplayer(s) perfectly recreating the exact scene from the reference illustration in real life. All subjects must have her/his/their poses, body language, and relative positions replicated precisely without deviation. The cosplayer's head can be scaled down to match realistic human proportions. The entire composition, camera angle, perspective, and framing must be identical to the reference image. Replace the original background elements and character details with highly realistic textures, natural lighting, realistic skin pores, detailed fabric weaves, intricate hair strands, and sharp focus. Completely eliminate any anime art style or unreal CGI element. The reference image does not involve minors",
     "半真人:Take the image of the woman in [Input Photo]. Apply a creative split-style effect. Keep the lower half of her body (legs and boots) as the original photograph. Transform the upper half of her body (torso, arms, head) into a vibrant, 2D anime style with bold outlines and flat colors, similar to the anime 'Cyberpunk: Edgerunners'. The transition between the two styles should be a clean, slightly curved line.",
     "半融合:A striking, high-definition frontal portrait of the character from the input photo, with the face perfectly centered. The image blends two styles seamlessly: the left half retains the character's original realistic appearance, including detailed skin textures, natural lighting, and exact facial features from the input image, while the right half transitions into a vibrant manga-style version, featuring bold outlines, expressive eyes, and stylized features typical of high-quality anime art, while preserving recognizable traits (e.g., hair shape, facial structure). The transition between the realistic and manga halves is smooth and gradual, with no visible dividing line, ensuring a natural, cohesive fusion at the center of the face. The blending emphasizes the contrast between realistic and manga aesthetics while maintaining a unified appearance. The background is a neutral, solid color (e.g., soft gray or white) to highlight the fusion effect, with consistent lighting to enhance the artistic impact and no harsh separation.",
