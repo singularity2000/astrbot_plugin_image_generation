@@ -20,7 +20,7 @@ from .workflow import ImageWorkflow
 @register(
     "astrbot_plugin_image_generation",
     "Singularity2000",
-    "文生图、图生图，可自定义提示词模板，兼容 OpenAI v1/resposnes 端点",
+    "文生图、图生图，可自定义提示词模板，兼容多种端点",
     "2.0.0",
     "https://github.com/singularity2000/astrbot_plugin_image_generation",
 )

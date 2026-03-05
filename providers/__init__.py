@@ -6,12 +6,14 @@ from astrbot.core import AstrBotConfig
 from ..workflow import ImageWorkflow
 from .base import BaseProvider
 from .flow2api import Flow2APIProvider
+from .gemini import GeminiProvider
 from .generic import GenericImageProvider
 from .openai_responses import OpenAIResponsesProvider
 from .vertex_ai_anonymous import VertexAIAnonymousProvider
 
 
 PROVIDER_MAP: Dict[str, type] = {
+    "gemini": GeminiProvider,
     "openai_responses": OpenAIResponsesProvider,
     "siliconflow": GenericImageProvider,
     "bigmodel": GenericImageProvider,

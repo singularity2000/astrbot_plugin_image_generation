@@ -17,7 +17,7 @@
                     "model": {
                         "description": "模型名称",
                         "type": "string",
-                        "default": "gemini-3-pro-image-preview",
+                        "default": "gemini-3.1-flash-image-preview",
                         "hint": "Vertex AI 匿名接口使用的模型"
                     },
                     "image_size": {
@@ -74,6 +74,74 @@
                         "description": "API请求超时(秒)",
                         "type": "int",
                         "default": 120,
+                        "hint": "调用此节点 API 的超时时间（秒）"
+                    }
+                }
+            },
+            "gemini": {
+                "name": "Gemini 原生 API",
+                "hint": "Google Gemini 原生接口，使用 API Key 直连 (generativelanguage.googleapis.com)",
+                "items": {
+                    "enabled": {
+                        "description": "启用此节点",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "关闭后此节点将被跳过"
+                    },
+                    "api_url": {
+                        "description": "API 地址",
+                        "type": "string",
+                        "default": "https://generativelanguage.googleapis.com/v1beta/models",
+                        "hint": "Gemini API 基础地址，格式为 https://<host>/v1beta/models。可替换为第三方中转地址。"
+                    },
+                    "model": {
+                        "description": "模型名称",
+                        "type": "string",
+                        "default": "gemini-3.1-flash-image-preview",
+                        "hint": "Gemini 图片生成模型名称"
+                    },
+                    "api_keys": {
+                        "description": "API 密钥列表",
+                        "type": "list",
+                        "default": [],
+                        "hint": "Google AI Studio 的 API Key，可填写多个自动轮换",
+                        "items": { "type": "string", "description": "API 密钥" }
+                    },
+                    "image_size": {
+                        "description": "生图清晰度",
+                        "type": "string",
+                        "default": "智能匹配",
+                        "options": ["1K", "2K", "4K", "智能匹配"],
+                        "hint": "生成图片的分辨率等级（仅 gemini-3 系模型有效）。'智能匹配'将优先使用提示词中的 1K/2K/4K 关键词，匹配不到则默认 1K。"
+                    },
+                    "google_search": {
+                        "description": "启用谷歌搜索",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "允许模型使用谷歌搜索获取实时信息（仅 gemini-3 系模型有效）"
+                    },
+                    "system_prompt": {
+                        "description": "系统提示词",
+                        "type": "text",
+                        "default": "",
+                        "hint": "留空将不传递这个参数。可以指导模型生成特定风格的图片。"
+                    },
+                    "proxy": {
+                        "description": "网络代理",
+                        "type": "string",
+                        "default": "",
+                        "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
+                    },
+                    "max_retry": {
+                        "description": "最大重试次数",
+                        "type": "int",
+                        "default": 3,
+                        "hint": "本节点内请求失败时的最大重试次数"
+                    },
+                    "api_timeout": {
+                        "description": "API请求超时(秒)",
+                        "type": "int",
+                        "default": 180,
                         "hint": "调用此节点 API 的超时时间（秒）"
                     }
                 }

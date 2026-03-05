@@ -19,6 +19,7 @@ async def migrate_legacy_config(conf: AstrBotConfig) -> None:
 
     # 旧的 template_key 映射
     legacy_map = {
+        "Gemini": "gemini",
         "OpenAI-responses": "openai_responses",
         "siliconflow": "siliconflow",
         "bigmodel": "bigmodel",
