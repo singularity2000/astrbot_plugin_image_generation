@@ -11,9 +11,10 @@ from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import At, Image, Plain, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
+from .migration import migrate_legacy_config
 from .persistence import PersistenceManager
+from .pipeline import ImageGenPipeline
 from .workflow import ImageWorkflow
-from .api_client import ImageGenPipeline
 
 
 @register(
@@ -36,7 +37,7 @@ class ImageGenerationPlugin(Star):
         self.iwf = ImageWorkflow(self.conf)
 
         # --- 向后兼容迁移：旧的单选配置 → 新的 api_pipeline ---
-        await self._migrate_legacy_config()
+        await migrate_legacy_config(self.conf)
 
         # --- 构建 Pipeline ---
         self.pipeline = ImageGenPipeline(self.conf, self.iwf)
@@ -67,76 +68,6 @@ class ImageGenerationPlugin(Star):
                 )
 
         logger.info("astrbot_plugin_image_generation 插件已加载")
-
-    async def _migrate_legacy_config(self):
-        """将旧版单选 API 配置迁移到新版 api_pipeline 管线配置（仅首次升级时执行）。"""
-        # 如果已有 pipeline 配置，说明已经迁移过或是新用户
-        if self.conf.get("api_pipeline", []):
-            return
-
-        # 检测旧配置键
-        old_api_from = self.conf.get("api_from", "")
-        if not old_api_from:
-            return
-
-        logger.info(
-            f"[迁移] 检测到旧版配置 api_from={old_api_from}，正在自动迁移到 api_pipeline..."
-        )
-
-        # 旧的 template_key 映射
-        legacy_map = {
-            "OpenAI-responses": "openai_responses",
-            "siliconflow": "siliconflow",
-            "bigmodel": "bigmodel",
-            "Flow2API": "flow2api",
-            "Vertex_AI_Anonymous": "vertex_ai_anonymous",
-        }
-        template_key = legacy_map.get(old_api_from, "openai_responses")
-
-        # 构建迁移后的节点配置
-        node = {"__template_key": template_key, "enabled": True}
-
-        if template_key == "vertex_ai_anonymous":
-            # Vertex AI 不需要 api_keys/api_url
-            node["model"] = self.conf.get("model", "gemini-3-pro-image-preview")
-            node["image_size"] = self.conf.get("vertex_ai_image_size", "智能匹配")
-            node["system_prompt"] = self.conf.get("vertex_ai_system_prompt", "")
-            node["impersonate_list"] = self.conf.get(
-                "vertex_ai_impersonate_list",
-                [
-                    "chrome131",
-                    "chrome124",
-                    "firefox135",
-                    "firefox133",
-                    "safari18_0",
-                    "safari17_0",
-                ],
-            )
-            node["verbose_logging"] = self.conf.get("vertex_ai_verbose_logging", True)
-            node["recaptcha_base_api"] = self.conf.get(
-                "recaptcha_base_api", "https://www.google.com"
-            )
-            node["vertex_ai_base_api"] = self.conf.get(
-                "vertex_ai_base_api", "https://cloudconsole-pa.clients6.google.com"
-            )
-            node["max_retry"] = self.conf.get("provider_max_retry", 10)
-        else:
-            node["api_url"] = self.conf.get("api_url", "")
-            node["model"] = self.conf.get("model", "")
-            node["api_keys"] = self.conf.get("api_keys", [])
-            node["max_retry"] = self.conf.get("provider_max_retry", 3)
-
-        # 迁移旧的全局代理设置
-        if self.conf.get("use_proxy", False) and self.conf.get("proxy_url", ""):
-            node["proxy"] = self.conf.get("proxy_url", "")
-
-        # 迁移旧的全局超时设置
-        old_timeout = self.conf.get("api_timeout", None)
-        if old_timeout is not None:
-            node["api_timeout"] = old_timeout
-
-        await self.conf.set("api_pipeline", [node])
-        logger.info(f"[迁移] 已将旧配置迁移为 api_pipeline 的首个节点: {template_key}")
 
     async def _load_prompt_map(self):
         logger.info("正在加载 prompts...")

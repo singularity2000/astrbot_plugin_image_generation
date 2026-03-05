@@ -1,14 +1,18 @@
 import asyncio
 import base64
 import json
+import random
 import re
 import string
-import random
-from abc import ABC, abstractmethod
-from datetime import datetime
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Optional, Union
 from urllib.parse import parse_qs, urlparse
+
 import aiohttp
+from bs4 import BeautifulSoup
+
+from astrbot import logger
+
+from .base import BaseProvider
 
 try:
     from curl_cffi.requests import AsyncSession as CurlSession
@@ -16,306 +20,6 @@ try:
     CURL_CFFI_AVAILABLE = True
 except ImportError:
     CURL_CFFI_AVAILABLE = False
-from bs4 import BeautifulSoup
-from astrbot import logger
-from astrbot.core import AstrBotConfig
-from .workflow import ImageWorkflow
-
-
-# ---------------------------------------------------------------------------
-# 基类：所有 API 提供商的公共接口
-# ---------------------------------------------------------------------------
-
-
-class BaseProvider(ABC):
-    """API 提供商基类。每个子类实现一种 API 的调用逻辑。"""
-
-    def __init__(
-        self, node_config: dict, workflow: ImageWorkflow, global_config: AstrBotConfig
-    ):
-        self.node = node_config
-        self.iwf = workflow
-        self.conf = global_config
-        self.key_index = 0
-        self.key_lock = asyncio.Lock()
-
-    @property
-    def name(self) -> str:
-        """供日志和错误信息使用的提供商名称。"""
-        return self.__class__.__name__
-
-    @property
-    def enabled(self) -> bool:
-        return self.node.get("enabled", True)
-
-    @property
-    def max_retry(self) -> int:
-        return self.node.get("max_retry", 3)
-
-    @property
-    def api_timeout(self) -> int:
-        return self.node.get("api_timeout", 300)
-
-    @property
-    def proxy(self) -> Optional[str]:
-        """节点级代理。留空则不使用代理。"""
-        p = self.node.get("proxy", "")
-        return p if p else None
-
-    async def _get_api_key(self) -> Optional[str]:
-        keys = self.node.get("api_keys", [])
-        if not keys:
-            return None
-        async with self.key_lock:
-            key = keys[self.key_index % len(keys)]
-            self.key_index = (self.key_index + 1) % len(keys)
-            return key
-
-    def get_api_keys(self) -> list:
-        """返回此节点的 key 列表引用（供 main.py 管理命令使用）。"""
-        return self.node.get("api_keys", [])
-
-    @abstractmethod
-    async def generate(
-        self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str]:
-        """
-        执行生图调用。
-        返回 bytes 表示成功（图片数据），返回 str 表示失败（错误信息）。
-        """
-        ...
-
-    async def close(self):
-        """可选的资源清理。子类按需覆写。"""
-        pass
-
-
-# ---------------------------------------------------------------------------
-# 通用 API 提供商（硅基流动 / 智谱 AI 等标准 images/generations 端点）
-# ---------------------------------------------------------------------------
-
-
-class GenericImageProvider(BaseProvider):
-    """
-    通用的图像生成 API（兼容 siliconflow / bigmodel 等 /images/generations 端点）。
-    根据 __template_key 自动决定响应解析字段。
-    """
-
-    # 不同提供商的响应数据字段映射
-    DATA_FORM = {"siliconflow": "images", "bigmodel": "data"}
-
-    async def generate(
-        self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str]:
-        api_url = self.node.get("api_url")
-        if not api_url:
-            return f"{self.name}: 配置错误 - 未设置 API URL"
-
-        model_name = self.node.get("model")
-        payload: Dict[str, Any] = {"model": model_name, "prompt": prompt}
-
-        if image_bytes_list:
-            for i, img in enumerate(image_bytes_list[:3]):
-                key = "image" if i == 0 else f"image{i + 1}"
-                payload[key] = (
-                    f"data:image/png;base64,{base64.b64encode(img).decode('utf-8')}"
-                )
-
-        template_key = self.node.get("__template_key", "")
-        data_form = self.DATA_FORM.get(template_key, "images")
-
-        last_err = "未知错误"
-        for i in range(self.max_retry):
-            api_key = await self._get_api_key()
-            if not api_key:
-                return f"{self.name}: 配置错误 - 无 API Key"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            }
-
-            try:
-                async with self.iwf.session.post(
-                    api_url,
-                    json=payload,
-                    headers=headers,
-                    proxy=self.proxy,
-                    timeout=self.api_timeout,
-                ) as resp:
-                    if resp.status != 200:
-                        last_err = f"API请求失败 (HTTP {resp.status})"
-                    else:
-                        data = await resp.json()
-                        try:
-                            url = data[data_form][0]["url"]
-                            if url.startswith("data:image/"):
-                                return base64.b64decode(url.split(",", 1)[1])
-                            return await self.iwf._download_image(url) or "下载失败"
-                        except Exception:
-                            last_err = f"解析响应失败: {str(data)[:200]}"
-            except Exception as e:
-                last_err = f"错误: {e}"
-
-            # 付费API使用固定短间隔重试，无需拟人化抖动
-            await asyncio.sleep(1)
-
-        return f"{self.name} 生成失败: {last_err}"
-
-
-# ---------------------------------------------------------------------------
-# OpenAI Responses API
-# ---------------------------------------------------------------------------
-
-
-class OpenAIResponsesProvider(BaseProvider):
-    """兼容 OpenAI /v1/responses 端点。"""
-
-    async def generate(
-        self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str]:
-        api_url = self.node.get("api_url")
-        model_name = self.node.get("model")
-
-        content_items = [{"type": "input_text", "text": prompt}]
-        for img in image_bytes_list:
-            content_items.append(
-                {
-                    "type": "input_image",
-                    "image_url": f"data:image/png;base64,{base64.b64encode(img).decode('utf-8')}",
-                }
-            )
-
-        payload = {
-            "model": model_name,
-            "input": [{"role": "user", "content": content_items}],
-            "tools": [{"type": "image_generation"}],
-            "tool_choice": {"type": "image_generation"},
-        }
-
-        last_err = "未知错误"
-        for i in range(self.max_retry):
-            api_key = await self._get_api_key()
-            if not api_key:
-                return f"{self.name}: 配置错误 - 无 API Key"
-
-            try:
-                async with self.iwf.session.post(
-                    api_url,
-                    json=payload,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    proxy=self.proxy,
-                ) as resp:
-                    data = await resp.json()
-                    if resp.status != 200:
-                        last_err = f"API错误: {data}"
-                    else:
-                        b64 = None
-                        if data.get("object") == "response":
-                            for item in data.get("output", []):
-                                if item.get("type") == "image_generation_call":
-                                    b64 = item.get("result")
-                                    break
-                        if not b64:
-                            for item in data.get("data", []):
-                                if item.get("type") == "image_result":
-                                    b64 = item.get("b64_json")
-                                    break
-
-                        if b64:
-                            if "base64," in b64:
-                                b64 = b64.split("base64,", 1)[1]
-                            return base64.b64decode(b64)
-                        last_err = "未找到图像数据"
-            except Exception as e:
-                last_err = str(e)
-
-            # 付费API使用固定短间隔重试
-            await asyncio.sleep(1)
-
-        return f"OpenAI Responses 生成失败: {last_err}"
-
-
-# ---------------------------------------------------------------------------
-# Flow2API（Chat Completions 中转）
-# ---------------------------------------------------------------------------
-
-
-class Flow2APIProvider(BaseProvider):
-    """兼容 Flow2API Chat Completions 端点。"""
-
-    async def generate(
-        self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str]:
-        api_url = self.node.get("api_url")
-        model_name = self.node.get("model")
-        if not api_url:
-            return f"{self.name}: 配置错误 - 无 API URL"
-
-        content = [{"type": "text", "text": prompt}]
-        for img in image_bytes_list:
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{base64.b64encode(img).decode('utf-8')}",
-                        "detail": "high",
-                    },
-                }
-            )
-
-        payload = {
-            "model": model_name,
-            "messages": [{"role": "user", "content": content}],
-            "stream": True,
-        }
-
-        last_err = "未知错误"
-        for i in range(self.max_retry):
-            api_key = await self._get_api_key()
-            if not api_key:
-                return f"{self.name}: 配置错误 - 无 API Key"
-
-            try:
-                async with self.iwf.session.post(
-                    api_url,
-                    json=payload,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    proxy=self.proxy,
-                ) as resp:
-                    if resp.status != 200:
-                        last_err = f"HTTP {resp.status}"
-                    else:
-                        response_text = await resp.text()
-                        full_content = ""
-                        for line in response_text.strip().split("\n"):
-                            if line.startswith("data: ") and "[DONE]" not in line:
-                                try:
-                                    chunk = json.loads(line[6:])
-                                    full_content += (
-                                        chunk["choices"][0]
-                                        .get("delta", {})
-                                        .get("content", "")
-                                    )
-                                except:
-                                    pass
-
-                        match = re.search(r"https?://[^\s)]+", full_content)
-                        if match:
-                            url = match.group(0)
-                            return await self.iwf._download_image(url) or "下载失败"
-                        last_err = "未找到图片URL"
-            except Exception as e:
-                last_err = str(e)
-
-            # 付费API使用固定短间隔重试
-            await asyncio.sleep(1)
-
-        return f"Flow2API 生成失败: {last_err}"
-
-
-# ---------------------------------------------------------------------------
-# Vertex AI 匿名（逆向 API，自带 Key 和专属逻辑）
-# ---------------------------------------------------------------------------
 
 
 class VertexAIAnonymousProvider(BaseProvider):
@@ -324,9 +28,7 @@ class VertexAIAnonymousProvider(BaseProvider):
     无需用户提供 API Key，自带 Recaptcha 验证与浏览器指纹伪装。
     """
 
-    def __init__(
-        self, node_config: dict, workflow: ImageWorkflow, global_config: AstrBotConfig
-    ):
+    def __init__(self, node_config: dict, workflow, global_config):
         super().__init__(node_config, workflow, global_config)
         self.impersonate_index = 0
         self.request_count = 0
@@ -429,12 +131,18 @@ class VertexAIAnonymousProvider(BaseProvider):
         api_timeout = self.api_timeout
 
         last_err = "未知错误"
-        for i in range(self.max_retry):
-            token = await self._get_recaptcha_token(recaptcha_base)
-            if not token:
-                last_err = "获取 recaptcha token 失败"
-                await self.close()
-                continue
+        token = await self._get_recaptcha_token(recaptcha_base)
+        if not token:
+            return "Vertex AI 生成失败: 获取 recaptcha token 失败"
+
+        # 当前 recaptcha token 的本地尝试次数：
+        # 经验上在 Failed to verify action 场景下，第二次提交同 token 可能成功
+        captcha_try_count = 0
+
+        attempt = 0
+        while attempt < self.max_retry:
+            attempt += 1
+            error_status_code = None
 
             body["variables"]["recaptchaToken"] = token
             api_url = (
@@ -474,9 +182,14 @@ class VertexAIAnonymousProvider(BaseProvider):
                     for elem in result:
                         for item in elem.get("results", []):
                             if item.get("errors"):
-                                last_err = (
-                                    f"API返回错误: {item['errors'][0].get('message')}"
+                                err_item = item["errors"][0]
+                                err_msg = err_item.get("message", "")
+                                error_status_code = (
+                                    err_item.get("extensions", {})
+                                    .get("status", {})
+                                    .get("code")
                                 )
+                                last_err = f"API返回错误: {err_msg}"
                                 if (
                                     "SAFETY" in last_err
                                     or "content" in last_err.lower()
@@ -550,7 +263,14 @@ class VertexAIAnonymousProvider(BaseProvider):
                         for elem in result:
                             for item in elem.get("results", []):
                                 if item.get("errors"):
-                                    last_err = f"API返回错误: {item['errors'][0].get('message')}"
+                                    err_item = item["errors"][0]
+                                    err_msg = err_item.get("message", "")
+                                    error_status_code = (
+                                        err_item.get("extensions", {})
+                                        .get("status", {})
+                                        .get("code")
+                                    )
+                                    last_err = f"API返回错误: {err_msg}"
                                     if (
                                         "SAFETY" in last_err
                                         or "content" in last_err.lower()
@@ -573,8 +293,28 @@ class VertexAIAnonymousProvider(BaseProvider):
                 except Exception as e:
                     last_err = f"aiohttp 请求异常: {str(e)}"
 
+            if (
+                error_status_code == 3
+                and "Failed to verify action" in last_err
+                and captcha_try_count < 1
+            ):
+                captcha_try_count += 1
+                logger.info(
+                    "[VertexAI] 命中 Failed to verify action，复用同一 token 重试一次"
+                )
+                attempt -= 1
+                continue
+
+            if error_status_code == 3:
+                token = await self._get_recaptcha_token(recaptcha_base)
+                if not token:
+                    last_err = "获取 recaptcha token 失败"
+                    await self.close()
+                    continue
+                captcha_try_count = 0
+
             logger.warning(
-                f"Vertex AI API 调用失败，重试 ({i + 1}/{self.max_retry}): {last_err}"
+                f"Vertex AI API 调用失败，重试 ({attempt}/{self.max_retry}): {last_err}"
             )
             backoff_time = 2 + random.uniform(0, 3)
             if "Resource exhausted" in last_err:
@@ -702,107 +442,3 @@ class VertexAIAnonymousProvider(BaseProvider):
         except Exception as e:
             logger.error(f"获取 recaptcha token 过程中发生异常: {str(e)}")
         return None
-
-
-# ---------------------------------------------------------------------------
-# 提供商工厂
-# ---------------------------------------------------------------------------
-
-PROVIDER_MAP: Dict[str, type] = {
-    "openai_responses": OpenAIResponsesProvider,
-    "siliconflow": GenericImageProvider,
-    "bigmodel": GenericImageProvider,
-    "flow2api": Flow2APIProvider,
-    "vertex_ai_anonymous": VertexAIAnonymousProvider,
-}
-
-
-def create_provider(
-    node_config: dict, workflow: ImageWorkflow, global_config: AstrBotConfig
-) -> Optional[BaseProvider]:
-    """根据 template_key 创建对应的 Provider 实例。"""
-    template_key = node_config.get("__template_key", "")
-    cls = PROVIDER_MAP.get(template_key)
-    if not cls:
-        logger.warning(f"未知的 API 提供商模板: {template_key}，跳过")
-        return None
-    return cls(node_config, workflow, global_config)
-
-
-# ---------------------------------------------------------------------------
-# 管线调度器（Pipeline）
-# ---------------------------------------------------------------------------
-
-
-class ImageGenPipeline:
-    """
-    管线调度器：按顺序依次调用 enabled 的 Provider，第一个成功即返回，
-    失败则自动回退到下一个。
-    """
-
-    def __init__(self, global_config: AstrBotConfig, workflow: ImageWorkflow):
-        self.conf = global_config
-        self.iwf = workflow
-        self.providers: List[BaseProvider] = []
-        self.api_call_lock = asyncio.Lock()
-        self.last_api_call_time: Optional[datetime] = None
-
-    def build(self, pipeline_config: list):
-        """从配置列表构建 Provider 链。"""
-        self.providers.clear()
-        for node in pipeline_config:
-            provider = create_provider(node, self.iwf, self.conf)
-            if provider:
-                self.providers.append(provider)
-        enabled_names = [p.name for p in self.providers if p.enabled]
-        logger.info(
-            f"API 管线构建完成: {enabled_names} "
-            f"({len(self.providers)} 个节点, {len(enabled_names)} 个已启用)"
-        )
-
-    async def check_rate_limit(self) -> Optional[str]:
-        rate_limit = self.conf.get("rate_limit_seconds", 120)
-        if rate_limit <= 0:
-            return None
-        async with self.api_call_lock:
-            now = datetime.now()
-            if self.last_api_call_time:
-                elapsed = (now - self.last_api_call_time).total_seconds()
-                if elapsed < rate_limit:
-                    return f"⏳ 操作太频繁，请在 {int(rate_limit - elapsed)} 秒后再试。"
-            self.last_api_call_time = now
-        return None
-
-    async def execute(
-        self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str]:
-        """
-        依次调用管线中已启用的 Provider。
-        返回 bytes 表示成功（图片数据），返回 str 表示全部失败（汇总错误信息）。
-        """
-        errors: List[str] = []
-        for provider in self.providers:
-            if not provider.enabled:
-                continue
-            logger.info(f"[Pipeline] 尝试: {provider.name}")
-            result = await provider.generate(image_bytes_list, prompt)
-            if isinstance(result, bytes):
-                return result
-            logger.warning(f"[Pipeline] {provider.name} 失败: {result}")
-            errors.append(f"{provider.name}: {result}")
-
-        if not errors:
-            return "API 管线为空或无已启用的提供商，请在配置页面添加至少一个 API 节点。"
-        return "所有 API 均失败:\n" + "\n".join(errors)
-
-    def get_first_keyed_provider(self) -> Optional[BaseProvider]:
-        """找到管线中第一个拥有 api_keys 配置的 Provider（供 Key 管理命令使用）。"""
-        for p in self.providers:
-            if p.enabled and "api_keys" in p.node:
-                return p
-        return None
-
-    async def close(self):
-        """关闭所有 Provider 的资源。"""
-        for p in self.providers:
-            await p.close()
