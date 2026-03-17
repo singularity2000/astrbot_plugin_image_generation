@@ -400,12 +400,6 @@
         "hint": "推荐开启。开启后，指令需要前缀（如 '/'）或 @机器人 才能触发，可避免日常聊天误触。",
         "default": true
     },
-    "extra_prefix": {
-        "description": "【通用】自定义图生图提示词模式的前缀",
-        "hint": "用于自定义图生图提示词模板，例如设置为 '图生图'，则使用 '图生图 <你的描述>' 来调用（需发送或引用图片）",
-        "type": "string",
-        "default": "图生图"
-    },
     "concise_mode": {
         "description": "【通用】简洁模式",
         "type": "bool",

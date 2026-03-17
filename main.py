@@ -128,7 +128,7 @@ class ImageGenerationPlugin(Star):
         if not text:
             return
         cmd = text.split()[0].strip()
-        bnn_command = self.conf.get("extra_prefix", "图生图")
+        bnn_command = "图生图"
         user_prompt = ""
         if cmd == bnn_command:
             user_prompt = text.removeprefix(cmd).strip()
@@ -137,6 +137,8 @@ class ImageGenerationPlugin(Star):
             display_cmd = (
                 user_prompt[:10] + "..." if len(user_prompt) > 10 else user_prompt
             )
+            # 图生图命令交由专用 command 处理，避免重复触发
+            return
         elif cmd in self.prompt_map:
             user_prompt = self.prompt_map.get(cmd)
             display_cmd = cmd
@@ -157,6 +159,21 @@ class ImageGenerationPlugin(Star):
             return
 
         async for res in self.handle_image_gen_logic(event, prompt, is_i2i=False):
+            yield res
+        event.stop_event()
+
+    @filter.command("图生图", prefix_optional=True)
+    async def on_image_to_image_request(self, event: AstrMessageEvent):
+        prompt = event.message_str.strip()
+        if prompt.startswith("图生图"):
+            prompt = prompt.removeprefix("图生图").strip()
+        if not prompt:
+            yield event.plain_result(
+                "请提供图生图的描述。用法: #图生图 <描述>（并发送或引用图片）"
+            )
+            return
+
+        async for res in self.handle_image_gen_logic(event, prompt, is_i2i=True):
             yield res
         event.stop_event()
 
