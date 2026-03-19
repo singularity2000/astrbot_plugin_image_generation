@@ -196,6 +196,61 @@
                     }
                 }
             },
+            "openai_compat_chat": {
+                "name": "OpenAI Chat Completions 兼容",
+                "hint": "兼容 OpenAI 官方 / 第三方 OpenAI 格式的 Chat Completions 生图/视频返回端点",
+                "items": {
+                    "enabled": {
+                        "description": "启用此节点",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "关闭后此节点将被跳过"
+                    },
+                    "api_url": {
+                        "description": "API 地址",
+                        "type": "string",
+                        "default": "http://localhost:8081/v1/chat/completions",
+                        "hint": "OpenAI Chat Completions 端点地址，既可填官方地址，也兼容第三方中转"
+                    },
+                    "model": {
+                        "description": "模型名称",
+                        "type": "string",
+                        "default": "gemini-3.0-pro-image-landscape",
+                        "hint": "例如 gemini-3.0-pro-image-landscape、portrait，或其他兼容端点支持的模型"
+                    },
+                    "api_keys": {
+                        "description": "API 密钥列表",
+                        "type": "list",
+                        "default": [],
+                        "hint": "可填写多个密钥，自动轮换使用",
+                        "items": { "type": "string", "description": "API 密钥" }
+                    },
+                    "proxy": {
+                        "description": "网络代理",
+                        "type": "string",
+                        "default": "",
+                        "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
+                    },
+                    "max_retry": {
+                        "description": "最大重试次数",
+                        "type": "int",
+                        "default": 3,
+                        "hint": "本节点内请求失败时的最大重试次数"
+                    },
+                    "api_timeout": {
+                        "description": "API请求超时(秒)",
+                        "type": "int",
+                        "default": 120,
+                        "hint": "调用此节点 API 的超时时间（秒）"
+                    },
+                    "stream": {
+                        "description": "使用流式响应",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "开启后请求将携带 stream=true。若某些第三方兼容端点流式实现不稳定，可关闭后走普通 JSON 响应。"
+                    }
+                }
+            },
             "openai_responses": {
                 "name": "OpenAI Responses",
                 "hint": "兼容 OpenAI /v1/responses 端点（如 Gemini 中转）",
@@ -342,56 +397,8 @@
                         "hint": "调用此节点 API 的超时时间（秒）"
                     }
                 }
-            },
-            "flow2api": {
-                "name": "Flow2API",
-                "hint": "Flow2API 中转服务（兼容 Chat Completions 端点）",
-                "items": {
-                    "enabled": {
-                        "description": "启用此节点",
-                        "type": "bool",
-                        "default": true,
-                        "hint": "关闭后此节点将被跳过"
-                    },
-                    "api_url": {
-                        "description": "API 地址",
-                        "type": "string",
-                        "default": "http://localhost:8081/v1/chat/completions",
-                        "hint": "Flow2API Chat Completions 端点地址"
-                    },
-                    "model": {
-                        "description": "模型名称",
-                        "type": "string",
-                        "default": "gemini-3.0-pro-image-landscape",
-                        "hint": "例如 gemini-3.0-pro-image-landscape 或 portrait"
-                    },
-                    "api_keys": {
-                        "description": "API 密钥列表",
-                        "type": "list",
-                        "default": [],
-                        "hint": "可填写多个密钥，自动轮换使用",
-                        "items": { "type": "string", "description": "API 密钥" }
-                    },
-                    "proxy": {
-                        "description": "网络代理",
-                        "type": "string",
-                        "default": "",
-                        "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
-                    },
-                    "max_retry": {
-                        "description": "最大重试次数",
-                        "type": "int",
-                        "default": 3,
-                        "hint": "本节点内请求失败时的最大重试次数"
-                    },
-                    "api_timeout": {
-                        "description": "API请求超时(秒)",
-                        "type": "int",
-                        "default": 120,
-                        "hint": "调用此节点 API 的超时时间（秒）"
-                    }
-                }
             }
+
         }
     },
     "prefix": {

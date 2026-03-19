@@ -23,7 +23,8 @@ async def migrate_legacy_config(conf: AstrBotConfig) -> None:
         "OpenAI-responses": "openai_responses",
         "siliconflow": "siliconflow",
         "bigmodel": "bigmodel",
-        "Flow2API": "flow2api",
+        "Flow2API": "openai_compat_chat",
+        "OpenAI-compat-chat": "openai_compat_chat",
         "Vertex_AI_Anonymous": "vertex_ai_anonymous",
     }
     template_key = legacy_map.get(old_api_from, "openai_responses")

@@ -8,7 +8,7 @@ from astrbot import logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
-from astrbot.core.message.components import At, Image, Plain, Reply
+from astrbot.core.message.components import At, Image, Plain, Reply, Video
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .migration import migrate_legacy_config
@@ -291,6 +291,32 @@ class ImageGenerationPlugin(Star):
                 )
             else:
                 yield event.chain_result([Image.fromBytes(res), Plain(caption_text)])
+        elif isinstance(res, dict) and res.get("type") == "video" and res.get("url"):
+            caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", "结果类型: 视频"]
+            if is_i2i:
+                caption_parts.append(f"预设: {display_name}")
+
+            if is_master:
+                caption_parts.append("管理员剩余次数: ∞")
+            else:
+                if self.conf.get("enable_user_limit", True):
+                    caption_parts.append(
+                        f"个人剩余次数: {self.persistence.get_user_count(sender_id)}"
+                    )
+                if self.conf.get("enable_group_limit", False) and group_id:
+                    caption_parts.append(
+                        f"本群剩余次数: {self.persistence.get_group_count(group_id)}"
+                    )
+
+            caption_text = " | ".join(caption_parts)
+            video_component = Video.fromURL(url=res["url"])
+            if concise_mode:
+                logger.info(caption_text)
+                yield event.chain_result(
+                    [Reply(id=event.message_obj.message_id), video_component]
+                )
+            else:
+                yield event.chain_result([video_component, Plain(caption_text)])
         else:
             yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}")
 

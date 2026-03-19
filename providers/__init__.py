@@ -3,9 +3,9 @@ from astrbot.core import AstrBotConfig
 
 from ..workflow import ImageWorkflow
 from .base import BaseProvider
-from .flow2api import Flow2APIProvider
 from .gemini import GeminiProvider
 from .generic import GenericImageProvider
+from .openai_compat_chat import Flow2APIProvider, OpenAICompatChatProvider
 from .openai_responses import OpenAIResponsesProvider
 from .vertex_ai import VertexAIProvider
 from .vertex_ai_anonymous import VertexAIAnonymousProvider
@@ -14,6 +14,7 @@ from .vertex_ai_anonymous import VertexAIAnonymousProvider
 PROVIDER_MAP: dict[str, type[BaseProvider]] = {
     "gemini": GeminiProvider,
     "openai_responses": OpenAIResponsesProvider,
+    "openai_compat_chat": OpenAICompatChatProvider,
     "siliconflow": GenericImageProvider,
     "bigmodel": GenericImageProvider,
     "flow2api": Flow2APIProvider,

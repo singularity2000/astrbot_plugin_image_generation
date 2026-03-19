@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **多API支持**：支持多个 API 服务商（硅基流动、智谱 AI、Gemini、OpenAI-responses、Flow2API 等），可随意切换。
+- **多API支持**：支持多个 API 服务商（硅基流动、智谱 AI、Gemini、OpenAI-responses、OpenAI Chat Completions 兼容端点等），可随意切换。
 - **智能重试机制**：内置自动退避重试策略，遇到 API 限制 (429) 或网络波动时自动重试；若配置了多个 Key，会自动轮换 Key 尝试，最大程度保证生图成功率。
 - **免费接口支持**：内置 **Vertex_AI_Anonymous** 接口，基于 Google Gemini 模型，无需 API Key 即可免费使用（需配置反代或确保网络通畅）。
 - **LLM 函数调用**：支持 AstrBot 的函数调用（Function Calling）机制。开启后，机器人可以理解自然语言对话，智能判断是否需要画图，并自动调用插件生成图片，无需用户手动输入指令。
@@ -31,7 +31,7 @@
 
 | 配置项             | 类型   | 描述                                                                                                                              |
 | ------------------ | ------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `api_from`         | 字符串 | **API 来源选择**，可选值：`siliconflow`、`bigmodel`、`OpenAI-responses`、`Flow2API`、`Vertex_AI_Anonymous`。                                                      |
+| `api_from`         | 字符串 | **API 来源选择**，可选值：`siliconflow`、`bigmodel`、`OpenAI-responses`、`OpenAI Chat Completions 兼容`、`Vertex_AI_Anonymous`。                                                      |
 | `api_url`          | 字符串 | **(必需)** API 的请求地址。Vertex_AI_Anonymous 可留空。                                                                                                       |
 | `model`            | 字符串 | **(必需)** 图生图和文生图使用的默认模型名称。                                                                                      |
 | `api_keys`         | 列表   | **(必需)** 你的 API 密钥。可以通过 `#画图添加key` 指令管理，支持多个 Key。Vertex_AI_Anonymous 无需填写。                                                             |

@@ -112,8 +112,8 @@ class VertexAIAnonymousProvider(BaseProvider):
                         last_err = "获取 recaptcha token 失败"
                         await self.close()
 
-                # 指数退避: 1, 2, 4, 8, 16 (最大16秒) + 随机抖动
-                backoff_time = min(2 ** (attempt - 2), 16) + random.uniform(0, 3)
+                # 指数退避: 2, 4, 8, 16, 16... (最大16秒) + 随机抖动
+                backoff_time = min(2 ** (attempt - 1), 16) + random.uniform(0, 3)
                 await asyncio.sleep(backoff_time)
 
             error_status_code = None
