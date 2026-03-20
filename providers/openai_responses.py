@@ -32,9 +32,11 @@ class OpenAIResponsesProvider(BaseProvider):
 
         last_err = "未知错误"
         for i in range(self.max_retry):
+            attempt_no = i + 1
             api_key = await self._get_api_key()
             if not api_key:
                 return f"{self.name}: 配置错误 - 无 API Key"
+            resource_exhausted = False
 
             try:
                 async with self.iwf.session.post(
@@ -46,6 +48,9 @@ class OpenAIResponsesProvider(BaseProvider):
                     data = await resp.json()
                     if resp.status != 200:
                         last_err = f"API错误: {data}"
+                        resource_exhausted = self._is_resource_exhausted(
+                            resp.status, str(data)
+                        )
                     else:
                         b64 = None
                         if data.get("object") == "response":
@@ -67,7 +72,10 @@ class OpenAIResponsesProvider(BaseProvider):
             except Exception as e:
                 last_err = str(e)
 
-            # 付费API使用固定短间隔重试
-            await asyncio.sleep(1)
+            await self._log_retry_and_sleep(
+                attempt_no=attempt_no,
+                last_err=last_err,
+                resource_exhausted=resource_exhausted,
+            )
 
         return f"OpenAI Responses 生成失败: {last_err}"

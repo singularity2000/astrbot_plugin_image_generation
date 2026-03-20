@@ -1,7 +1,9 @@
 import asyncio
+import random
 from abc import ABC, abstractmethod
 from typing import List, Optional, Union
 
+from astrbot import logger
 from astrbot.core import AstrBotConfig
 
 from ..workflow import ImageWorkflow
@@ -54,6 +56,47 @@ class BaseProvider(ABC):
     def get_api_keys(self) -> list:
         """返回此节点的 key 列表引用（供 main.py 管理命令使用）。"""
         return self.node.get("api_keys", [])
+
+    def _resource_exhausted_delay(self, attempt_no: int) -> float:
+        """统一资源耗尽/429退避：2、4、8、16、16... + 0~3 秒抖动。"""
+        return min(2**attempt_no, 16) + random.uniform(0, 3)
+
+    def _normal_retry_delay(self) -> float:
+        """统一普通重试：3~5 秒抖动。"""
+        return random.uniform(3, 5)
+
+    def _is_resource_exhausted(self, status_code: int | None, detail: str = "") -> bool:
+        text = detail.lower()
+        return status_code == 429 or any(
+            key in text
+            for key in (
+                "resource exhausted",
+                "rate limit",
+                "too many requests",
+                "quota",
+            )
+        )
+
+    async def _log_retry_and_sleep(
+        self,
+        *,
+        attempt_no: int,
+        last_err: str,
+        resource_exhausted: bool,
+    ) -> None:
+        if attempt_no >= self.max_retry:
+            return
+        delay = (
+            self._resource_exhausted_delay(attempt_no)
+            if resource_exhausted
+            else self._normal_retry_delay()
+        )
+        reason = "频率/资源限制退避" if resource_exhausted else "普通重试"
+        logger.warning(
+            f"[{self.name}] 调用失败，准备{reason} ({attempt_no}/{self.max_retry})，"
+            f"{delay:.2f}s 后重试: {last_err}"
+        )
+        await asyncio.sleep(delay)
 
     @abstractmethod
     async def generate(

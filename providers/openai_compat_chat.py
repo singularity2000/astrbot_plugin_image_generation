@@ -29,6 +29,47 @@ class OpenAICompatChatProvider(BaseProvider):
         ".gifv",
     )
 
+    def _extract_readable_summary(self, response_text: str) -> str | None:
+        summary_parts: list[str] = []
+
+        try:
+            payload = json.loads(response_text)
+            for key in ("output_text", "text", "response"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    summary_parts.append(value.strip())
+
+            choices = payload.get("choices") or []
+            if isinstance(choices, list):
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    for container_name in ("message", "delta"):
+                        container = choice.get(container_name)
+                        if not isinstance(container, dict):
+                            continue
+                        content = container.get("content")
+                        if isinstance(content, str) and content.strip():
+                            summary_parts.append(content.strip())
+                        elif isinstance(content, list):
+                            for part in content:
+                                if not isinstance(part, dict):
+                                    continue
+                                text_value = part.get("text")
+                                if isinstance(text_value, str) and text_value.strip():
+                                    summary_parts.append(text_value.strip())
+        except json.JSONDecodeError:
+            pass
+
+        if not summary_parts:
+            fallback = response_text.strip()
+            if fallback:
+                return fallback[:500]
+            return None
+
+        merged = " | ".join(part for part in summary_parts if part)
+        return merged[:500] if merged else None
+
     def _is_video_url(self, url: str) -> bool:
         lowered = url.lower().split("?", 1)[0]
         return lowered.endswith(self.VIDEO_EXTENSIONS) or "/video" in lowered
@@ -234,9 +275,12 @@ class OpenAICompatChatProvider(BaseProvider):
 
         last_err = "未知错误"
         for i in range(self.max_retry):
+            attempt_no = i + 1
             api_key = await self._get_api_key()
             if not api_key:
                 return f"{self.name}: 配置错误 - 无 API Key"
+
+            resource_exhausted = False
 
             try:
                 async with self.iwf.session.post(
@@ -252,6 +296,9 @@ class OpenAICompatChatProvider(BaseProvider):
                     if resp.status != 200:
                         body = await resp.text()
                         last_err = f"HTTP {resp.status}: {body[:200]}"
+                        resource_exhausted = self._is_resource_exhausted(
+                            resp.status, body
+                        )
                     else:
                         response_text = await resp.text()
                         raw_data: bytes | None = None
@@ -291,15 +338,25 @@ class OpenAICompatChatProvider(BaseProvider):
                         else:
                             last_err = "未找到可解析的图片或视频结果"
 
+                        summary = self._extract_readable_summary(response_text)
+                        if summary:
+                            logger.warning(
+                                "[OpenAICompatChatProvider] 未解析到图片/视频，文本摘要: %s",
+                                summary,
+                            )
+
                         logger.debug(
-                            "OpenAICompatChatProvider 未解析到结果，响应预览: %s",
-                            response_text[:500],
+                            "OpenAICompatChatProvider 未解析到结果，原始响应: %s",
+                            response_text,
                         )
             except Exception as e:
                 last_err = str(e)
 
-            # 付费API使用固定短间隔重试
-            await asyncio.sleep(1)
+            await self._log_retry_and_sleep(
+                attempt_no=attempt_no,
+                last_err=last_err,
+                resource_exhausted=resource_exhausted,
+            )
 
         return f"OpenAI 兼容 Chat Completions 生成失败: {last_err}"
 

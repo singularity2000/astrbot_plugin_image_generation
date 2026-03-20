@@ -1,4 +1,3 @@
-import asyncio
 import base64
 from typing import Any
 
@@ -18,9 +17,11 @@ class VertexAIProvider(BaseProvider):
 
         last_err = "未知错误"
         for attempt in range(self.max_retry):
+            attempt_no = attempt + 1
             api_key = await self._get_api_key()
             if not api_key:
                 return f"{self.name}: 配置错误 - 无 API Key"
+            resource_exhausted = False
 
             url = f"{api_url}/{model_name}:generateContent?key={api_key}"
             context = self._build_context(image_bytes_list, prompt)
@@ -42,18 +43,9 @@ class VertexAIProvider(BaseProvider):
                             else str(data)[:200]
                         )
                         last_err = f"API请求失败 (HTTP {resp.status}): {err_msg}"
-
-                        if resp.status == 429:
-                            logger.warning(
-                                f"[VertexAI] 频率限制 (429)，退避重试 "
-                                f"({attempt + 1}/{self.max_retry})"
-                            )
-                            await asyncio.sleep(3)
-                            continue
-
-                        logger.warning(f"[VertexAI] {last_err}")
-                        await asyncio.sleep(1)
-                        continue
+                        resource_exhausted = self._is_resource_exhausted(
+                            resp.status, err_msg
+                        )
 
                     parse_result = self._extract_image_or_error(data)
                     if isinstance(parse_result, bytes):
@@ -62,15 +54,14 @@ class VertexAIProvider(BaseProvider):
                         return parse_result
                     last_err = "响应中未包含图片数据"
 
-            except asyncio.TimeoutError:
-                last_err = f"请求超时 ({self.api_timeout}s)"
             except Exception as e:
                 last_err = f"请求异常: {e}"
 
-            logger.warning(
-                f"[VertexAI] 调用失败 ({attempt + 1}/{self.max_retry}): {last_err}"
+            await self._log_retry_and_sleep(
+                attempt_no=attempt_no,
+                last_err=last_err,
+                resource_exhausted=resource_exhausted,
             )
-            await asyncio.sleep(1)
 
         return f"Vertex AI 生成失败: {last_err}"
 
