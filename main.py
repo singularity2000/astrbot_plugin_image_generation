@@ -325,6 +325,11 @@ class ImageGenerationPlugin(Star):
         if not self.is_global_admin(event):
             return
         raw = event.message_str.strip()
+        # 移除命令名本身（支持别名）
+        for cmd in ("画图添加模板", "lma", "lm添加"):
+            if raw.startswith(cmd):
+                raw = raw.removeprefix(cmd).strip()
+                break
         if ":" not in raw:
             yield event.plain_result(
                 "格式错误, 正确示例:\n#画图添加模板 姿势表:为这幅图创建一个姿势表, 摆出各种姿势"
@@ -342,7 +347,8 @@ class ImageGenerationPlugin(Star):
         if not found:
             prompt_list.append(f"{key}:{new_value}")
 
-        await self.conf.set("prompt_list", prompt_list)
+        self.conf["prompt_list"] = prompt_list
+        self.conf.save_config()
         await self._load_prompt_map()
         yield event.plain_result(f"已保存生图提示语模板:\n{key}:{new_value}")
 
@@ -489,7 +495,8 @@ class ImageGenerationPlugin(Star):
         api_keys.extend(added_keys)
         provider.node["api_keys"] = api_keys
         # 回写到持久化配置
-        await self.conf.set("api_pipeline", self.conf.get("api_pipeline", []))
+        self.conf["api_pipeline"] = self.conf.get("api_pipeline", [])
+        self.conf.save_config()
         yield event.plain_result(
             f"✅ 操作完成（{provider.name}），新增 {len(added_keys)} 个Key，当前共 {len(api_keys)} 个。"
         )
@@ -523,12 +530,14 @@ class ImageGenerationPlugin(Star):
         api_keys = provider.node.get("api_keys", [])
         if param.lower() == "all":
             provider.node["api_keys"] = []
-            await self.conf.set("api_pipeline", self.conf.get("api_pipeline", []))
+            self.conf["api_pipeline"] = self.conf.get("api_pipeline", [])
+            self.conf.save_config()
             yield event.plain_result(f"✅ 已删除全部 {len(api_keys)} 个 Key。")
         elif param.isdigit() and 1 <= int(param) <= len(api_keys):
             removed_key = api_keys.pop(int(param) - 1)
             provider.node["api_keys"] = api_keys
-            await self.conf.set("api_pipeline", self.conf.get("api_pipeline", []))
+            self.conf["api_pipeline"] = self.conf.get("api_pipeline", [])
+            self.conf.save_config()
             yield event.plain_result(f"✅ 已删除 Key: {removed_key[:8]}...")
         else:
             yield event.plain_result("格式错误，请使用 #画图删除key <序号|all>")

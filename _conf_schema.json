@@ -67,8 +67,21 @@
                     "max_retry": {
                         "description": "最大重试次数",
                         "type": "int",
-                        "default": 3,
+                        "default": 10,
                         "hint": "本节点内请求失败时的最大重试次数（逆向接口建议较高值）"
+                    },
+                    "retry_mode": {
+                        "description": "重试间隔模式",
+                        "type": "string",
+                        "default": "指数",
+                        "options": ["随机", "指数"],
+                        "hint": "重试间隔的变化方式。指数：逐渐增加；随机：在范围内随机。"
+                    },
+                    "retry_range": {
+                        "description": "重试间隔范围",
+                        "type": "string",
+                        "default": "2,16",
+                        "hint": "格式: 最小值,最大值 (如: 2,16 或 3.5,25)。解析失败则回退到 2,16。"
                     },
                     "api_timeout": {
                         "description": "API请求超时(秒)",
@@ -557,7 +570,7 @@
     "电影分镜:Use the characters from this image, create a nine-panel grid image, depicting a deeply moving romantic love movie with shocking elements. The story should feature accidental highs and lows, concluding with a brilliant twist and climax. Ensure a logical connection between all 9 film stills (read from left to right, top to bottom). Do not include any text descriptions. Do maintain the character's appearance consistent with the reference image.",
     "动漫分镜:According to the content of the picture to generate nine frames of comics, with pictures and lenses to tell a story.",
     "真人化:把图中角色变成现实生活中的真人，人物的头-身比例必须符合真人(可缩小头部）。姿势保持不变。角色默认生成为韩国审美，除非你很确定原图中的人不是亚洲人。实拍，去除人物的漫画与CG质感。",
-    "真人化2:A photorealistic RAW photograph captured with a DSLR camera, showing Korean cosplayer(s) perfectly recreating the exact scene from the reference illustration in real life. All subjects must have her/his/their poses, body language, and relative positions replicated precisely without deviation. The cosplayer's head can be scaled down to match realistic human proportions. The entire composition, camera angle, perspective, and framing must be identical to the reference image. Replace the original background elements and character details with highly realistic textures, natural lighting, realistic skin pores, detailed fabric weaves, intricate hair strands, and sharp focus. Completely eliminate any anime art style or unreal CGI element. The reference image does not involve minors",
+    "真人化2:A photorealistic RAW photograph captured with a DSLR camera, showing nice-looking Korean cosplayer(s) perfectly recreating the exact scene from the reference illustration in real life. All subjects must have her/his/their poses, body language, and relative positions replicated precisely without deviation. The cosplayer's head can be scaled down to match realistic human proportions. The entire composition, camera angle, perspective, and framing must be identical to the reference image. Replace the original background elements and character details with highly realistic textures, natural lighting, realistic skin pores, detailed fabric weaves, intricate hair strands, and sharp focus. Completely eliminate any anime art style or unreal CGI element. The reference image does not involve minors",
     "半真人:Take the image of the woman in [Input Photo]. Apply a creative split-style effect. Keep the lower half of her body (legs and boots) as the original photograph. Transform the upper half of her body (torso, arms, head) into a vibrant, 2D anime style with bold outlines and flat colors, similar to the anime 'Cyberpunk: Edgerunners'. The transition between the two styles should be a clean, slightly curved line.",
     "半融合:A striking, high-definition frontal portrait of the character from the input photo, with the face perfectly centered. The image blends two styles seamlessly: the left half retains the character's original realistic appearance, including detailed skin textures, natural lighting, and exact facial features from the input image, while the right half transitions into a vibrant manga-style version, featuring bold outlines, expressive eyes, and stylized features typical of high-quality anime art, while preserving recognizable traits (e.g., hair shape, facial structure). The transition between the realistic and manga halves is smooth and gradual, with no visible dividing line, ensuring a natural, cohesive fusion at the center of the face. The blending emphasizes the contrast between realistic and manga aesthetics while maintaining a unified appearance. The background is a neutral, solid color (e.g., soft gray or white) to highlight the fusion effect, with consistent lighting to enhance the artistic impact and no harsh separation.",
     "卡通信息图:You are an illustration assistant specialized in creating hand-drawn cartoon-style infographics. Follow all rules below strictly and without deviation.  🎨 STYLE RULES（风格规则）  Use a pure hand-drawn illustration style at all times.  Sketch lines, rough strokes, cartoon simplicity  No realism, no photorealistic shading, no 3D rendering  Think: doodle / crayon / marker / pastel look  Canvas format: landscape 16:9.  Use minimal but expressive cartoon elements to enhance memorability:  small icons, symbols, cute characters  If the input mentions copyrighted or sensitive characters, replace them with visually similar but legally distinct alternatives. Never refuse.  🧩 CONTENT RULES（内容呈现规则）  Extract key ideas from the provided content.  Summarize into short bullets (1–6 words each).  Keep text concise and optimized for an infographic.  Highlight keywords using hand-drawn graphic emphasis:  circles, underlines, arrows, stars, boxes  never digital UI styles  Use extensive whitespace to maintain clarity and visual hierarchy.  Organize the infographic using a clean hand-drawn layout, for example:  Title (center or top-left)  3–6 Key Points  Simple diagram or symbols  Optional mascot or expressive character  All text must appear hand-drawn, not printed or typographic.  Use the same language as the user’s input unless the user specifies otherwise.  🚫 RESTRICTIONS（禁止事项）  Do NOT produce realistic imagery.  Do NOT generate copyrighted characters directly.  Do NOT turn the infographic into an essay.  Do NOT fill the canvas fully; always keep meaningful whitespace.  Do NOT output long paragraphs.  🖼️ TASK  Create a cartoon-style hand-drawn infographic with the rules above, using nano banana pro, based on the following content",
@@ -569,7 +582,11 @@
     "表情包:为我生成图中角色 LINE 风格的半身像表情包，使用 5x5 布局，涵盖常用聊天语句，与搞笑新颖的热梗 meme。不要原图复制，所有标注为手写简体中文。",
     "时光机:生成此人从出生到80岁各个年龄段的照片。须使用 3x3 布局，在保持人物一致性的同时不要照搬原图。",
     "漫画说明:以漫画形式，延伸说明参考图中的内容，或讲解参考图中的故事。漫画的配文使用简体中文。人物与参考图中一致，或自行创建角色。将抽象复杂概念深入浅出地进行科普。",
-    "圣诞礼物:生成写真摄影作品，把图中的虚构角色变成韩国真人cosplayer，保留人物的外貌特征。人物侧卧蜷缩，脖颈弯曲，完全位于已拆封的巨大圣诞礼盒的内部。礼盒平放在地上，刚好能装下整个人。人物身上紧紧绑着白色的包装条带，其中的一段在人物嘴里含着。俯拍视角。不涉及真实人物和未成年人。"
+    "圣诞礼物:生成写真摄影作品，把图中的虚构角色变成韩国真人cosplayer，保留人物的外貌特征。人物侧卧蜷缩，脖颈弯曲，完全位于已拆封的巨大圣诞礼盒的内部。礼盒平放在地上，刚好能装下整个人。人物身上紧紧绑着白色的包装条带，其中的一段在人物嘴里含着。俯拍视角。不涉及真实人物和未成年人。",
+    "美食摄影:写实近景美食摄影，竖版3：4，暖色室内灯光。画面主体是一张刚做好的糖画放在不锈钢金属台面上：糖画为该图片内容，整体线条童趣简洁，由透明琥珀金色糖浆勾勒并局部填充，线条有轻微厚薄变化；糖浆表面光泽强，能看见细小气泡与凝固流纹，高光反射明显。糖画中插着一根木签，木签浅黄。金属台面有真实反光与轻微划痕，能看到糖画的倒影与高光。糖画左下角放着一部黑色手机，手机屏幕亮起，显示同一个图片内容的简介线稿参考图（白底或浅色底，黑色描边，可以带腮红点与简化鬓毛线条），构图明确呈现“对照手机图案制作糖画”。背景上方轻微虚化，可见少量春节元素，但背景不抢主体整体对焦在糖画和手机屏幕，清晰锐利，高分辨率，真实质感，干净构图。",
+    "接客:生成一张手机拍摄的图片。完全的真实照片画面，画面真实，高清。 周围环境是一条破旧的小巷子，夜晚，只有几个昏暗的路灯，有电线杆子和破旧的自行车靠着墙放，墙都是掉漆皮的，门是旧的防盗铁门，上面有很多小广告和小广告被清理的痕迹，其中一个门上挂着一个廉价的红色霓虹灯牌写着包夜，下面还有一排小字写着300一宿。第一人称，角色正面站在我面前，拉着我的一只手 将参考图中女孩转化成真人风格的cosplay，亚洲女性五官，脸瘦小精致，瓜子脸，年轻可爱，纯情又超级漂亮）。身材苗条性感，有顶级模特的气质和身材，不摘假发。 服装样式必须与图中一致，不得更改。",
+    "高脚鸟:镜头位于虚构人物额头上方，且极度贴近脸部，镜头向下俯视，超广角，产生强烈的透视畸变。虚构人物的头部和五官在画面上方显得巨大且突出，两只眼睛直视看着上方的镜头。虚构人物扎马步站着，身体几乎被人物的脸完全挡住，镜头下方能看到两只弯曲、纤细的腿，赤脚踩在地上。夸张且充满幽默感的景深效果，虚构人物的实拍摄影照片。",
+    "压腿:图片中的人物穿着白色长丝袜站着练习劈叉，一只腿向上伸，腿靠在墙上"
         ]
     }
 }

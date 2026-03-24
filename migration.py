@@ -71,5 +71,6 @@ async def migrate_legacy_config(conf: AstrBotConfig) -> None:
     if old_timeout is not None:
         node["api_timeout"] = old_timeout
 
-    await conf.set("api_pipeline", [node])
+    conf["api_pipeline"] = [node]
+    conf.save_config()
     logger.info(f"[迁移] 已将旧配置迁移为 api_pipeline 的首个节点: {template_key}")

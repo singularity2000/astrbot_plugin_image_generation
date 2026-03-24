@@ -7,7 +7,6 @@ import string
 from typing import List, Optional, Union
 from urllib.parse import parse_qs, urlparse
 
-import aiohttp
 from bs4 import BeautifulSoup
 
 from astrbot import logger
@@ -74,6 +73,9 @@ class VertexAIAnonymousProvider(BaseProvider):
     async def generate(
         self, image_bytes_list: List[bytes], prompt: str
     ) -> Union[bytes, str]:
+        if not CURL_CFFI_AVAILABLE:
+            return "Vertex AI 生成失败: 环境缺失 curl_cffi，无法规避 Google 指纹风控。请安装 curl_cffi 后重试。"
+
         # 会话老化机制：成功请求50次后主动轮换
         if self.request_count >= 50:
             if self.node.get("verbose_logging", True):
@@ -87,6 +89,14 @@ class VertexAIAnonymousProvider(BaseProvider):
         vertex_base = self.node.get("vertex_ai_base_api", DEFAULT_VERTEX_BASE)
         api_timeout = self.api_timeout
 
+        # 解析重试间隔配置
+        retry_mode = self.node.get("retry_mode", "指数")
+        retry_range = self.node.get("retry_range", "2,16")
+        try:
+            min_d, max_d = map(float, retry_range.split(","))
+        except (ValueError, AttributeError):
+            min_d, max_d = 2.0, 16.0
+
         last_err = "未知错误"
         token = await self._get_recaptcha_token(recaptcha_base)
         if not token:
@@ -97,6 +107,7 @@ class VertexAIAnonymousProvider(BaseProvider):
         captcha_try_count = 0
         attempt = 0
         error_status_code = None
+        next_delay = 0.0
         while attempt < self.max_retry:
             attempt += 1
 
@@ -112,138 +123,85 @@ class VertexAIAnonymousProvider(BaseProvider):
                         last_err = "获取 recaptcha token 失败"
                         await self.close()
 
-                # 指数退避: 2, 4, 8, 16, 16... (最大16秒) + 随机抖动
-                backoff_time = min(2 ** (attempt - 1), 16) + random.uniform(0, 3)
-                await asyncio.sleep(backoff_time)
+                await asyncio.sleep(next_delay)
 
             error_status_code = None
             body["variables"]["recaptchaToken"] = token
             api_url = self._build_api_url(vertex_base)
 
-            # 使用 curl_cffi 以规避指纹风控
-            if CURL_CFFI_AVAILABLE:
-                try:
-                    headers = {
-                        "referer": "https://console.cloud.google.com/vertex-ai",
-                        "Content-Type": "application/json",
-                        "Origin": "https://console.cloud.google.com",
-                    }
-                    session = await self._get_curl_session()
-                    resp = await session.post(
-                        api_url, json=body, headers=headers, timeout=api_timeout
-                    )
+            # 重置本轮错误状态
+            current_iter_err = None
 
-                    if resp.status_code != 200:
-                        last_err = f"API请求失败 (HTTP {resp.status_code})"
-                        if resp.status_code == 429:
-                            last_err = "API返回错误: 频率限制 (Resource exhausted)"
-                            error_status_code = 8
-                            logger.warning(
-                                "Vertex AI 429 Limited. Retrying with backoff..."
-                            )
-                        else:
-                            logger.warning(
-                                f"Vertex AI API error detail (Status {resp.status_code}): {resp.text[:500]}"
-                            )
-                            await self.close()
-                        continue
-
-                    result = resp.json()
-                    parsed = self._parse_result(result)
-                    if parsed is None:
-                        continue
-                    if parsed["status_code"] is not None:
-                        error_status_code = parsed["status_code"]
-                    if parsed["last_err"]:
-                        last_err = parsed["last_err"]
-                    if parsed["safety_blocked"]:
-                        return last_err
-                    if parsed["image_data"]:
-                        img_data = parsed["image_data"]
-                        logger.info(
-                            f"Successfully extracted image data ({len(img_data)} chars)"
-                        )
-                        self.request_count += 1
-                        return base64.b64decode(img_data)
-                except Exception as e:
-                    last_err = f"curl_cffi 请求异常: {str(e)}"
-                    await self.close()
-            else:
-                # 回退到 aiohttp 逻辑
+            # 执行生图请求 (使用 curl_cffi)
+            try:
                 headers = {
                     "referer": "https://console.cloud.google.com/vertex-ai",
                     "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                     "Origin": "https://console.cloud.google.com",
-                    "Accept-Encoding": "identity",
                 }
-                client_timeout = aiohttp.ClientTimeout(
-                    total=api_timeout, sock_read=api_timeout
+                session = await self._get_curl_session()
+                if not session:
+                    raise RuntimeError("无法创建 curl_cffi 会话")
+
+                resp = await session.post(
+                    api_url, json=body, headers=headers, timeout=api_timeout
                 )
-                try:
-                    async with self.iwf.session.post(
-                        api_url,
-                        json=body,
-                        headers=headers,
-                        proxy=self.proxy,
-                        timeout=client_timeout,
-                    ) as resp:
-                        if resp.status != 200:
-                            last_err = f"API请求失败 (HTTP {resp.status})"
-                            if resp.status == 429:
-                                last_err = "API返回错误: 频率限制 (Resource exhausted)"
-                                error_status_code = 8
-                            continue
 
-                        chunks = []
-                        async for chunk in resp.content.iter_any():
-                            chunks.append(chunk)
-                        content_bytes = b"".join(chunks)
-
-                        try:
-                            result = json.loads(content_bytes)
-                        except Exception:
-                            content_str = content_bytes.decode("utf-8", errors="ignore")
-                            last_brace = content_str.rfind("}")
-                            if last_brace != -1:
-                                result = json.loads(content_str[: last_brace + 1] + "]")
-                            else:
-                                last_err = (
-                                    f"无法解析响应 (收到 {len(content_bytes)} 字节)"
-                                )
-                                continue
-
-                        parsed = self._parse_result(result)
-                        if parsed is None:
-                            continue
-                        if parsed["status_code"] is not None:
-                            error_status_code = parsed["status_code"]
-                        if parsed["last_err"]:
-                            last_err = parsed["last_err"]
-                        if parsed["safety_blocked"]:
-                            return last_err
+                if resp.status_code != 200:
+                    error_status_code = 8 if resp.status_code == 429 else None
+                    current_iter_err = f"API请求失败 (HTTP {resp.status_code})"
+                    if resp.status_code != 429:
+                        await self.close()
+                else:
+                    result = resp.json()
+                    parsed = self._parse_result(result)
+                    if parsed:
+                        error_status_code = parsed["status_code"]
                         if parsed["image_data"]:
                             self.request_count += 1
                             return base64.b64decode(parsed["image_data"])
-                except Exception as e:
-                    last_err = f"aiohttp 请求异常: {str(e)}"
+                        if parsed["safety_blocked"]:
+                            return parsed["last_err"]
+                        current_iter_err = parsed["last_err"]
+            except Exception as e:
+                current_iter_err = f"Vertex AI 请求异常: {str(e)}"
+                await self.close()
 
+            # --- 统一错误处理与重试逻辑 ---
+            if current_iter_err:
+                last_err = current_iter_err
+
+            # 处理 reCAPTCHA 验证失败 (FVA)
             if (
                 error_status_code == 3
                 and "Failed to verify action" in last_err
                 and captcha_try_count < 1
             ):
                 captcha_try_count += 1
+                next_delay = 2.0
                 logger.info(
-                    "[VertexAI] 命中 Failed to verify action，复用同一 token 重试一次"
+                    f"[VertexAI] 命中 Failed to verify action，复用同一 token {next_delay:.2f}s 后重试一次"
                 )
                 attempt -= 1
-                error_status_code = None  # 防止在下一次循环开头触发退避和 Token 刷新
+                error_status_code = None
                 continue
 
-            logger.warning(
-                f"Vertex AI API 调用失败，重试 ({attempt}/{self.max_retry}): {last_err}"
-            )
+            # 处理其他需要退避的重试
+            if attempt < self.max_retry:
+                if retry_mode == "指数":
+                    next_delay = min(min_d * (2 ** (attempt - 1)), max_d)
+                else:
+                    next_delay = random.uniform(min_d, max_d)
+
+                log_msg = f"Vertex AI API 调用失败，重试 ({attempt}/{self.max_retry}): {last_err}，{next_delay:.2f}s 后重试"
+                if error_status_code == 8:
+                    logger.warning(f"Vertex AI 429 Limited. {log_msg}")
+                else:
+                    logger.warning(log_msg)
+            else:
+                logger.warning(
+                    f"Vertex AI API 调用失败，达到最大重试次数 ({attempt}/{self.max_retry}): {last_err}"
+                )
 
         return f"Vertex AI 生成失败: {last_err}"
 
@@ -416,56 +374,6 @@ class VertexAIAnonymousProvider(BaseProvider):
         return None
 
     async def _get_recaptcha_token(self, base_url: str) -> Optional[str]:
-        # 优先使用 curl_cffi 路径
-        if CURL_CFFI_AVAILABLE:
-            return await self._get_recaptcha_token_curl(base_url)
-
-        try:
-            for _ in range(3):
-                cb = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-                anchor_url = (
-                    f"{base_url}/recaptcha/enterprise/anchor?ar=1"
-                    f"&k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj"
-                    f"&co=aHR0cHM6Ly9jb25zb2xlLmNsb3VkLmdvb2dsZS5jb206NDQz"
-                    f"&hl=zh-CN&v=jdMmXeCQEkPbnFDy9T04NbgJ"
-                    f"&size=invisible&anchor-ms=20000&execute-ms=15000&cb={cb}"
-                )
-
-                async with self.iwf.session.get(anchor_url, proxy=self.proxy) as resp:
-                    if resp.status != 200:
-                        continue
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, "html.parser")
-                    token_input = soup.find("input", {"id": "recaptcha-token"})
-                    if not token_input:
-                        continue
-                    base_token = token_input.get("value")
-
-                reload_url = f"{base_url}/recaptcha/enterprise/reload?k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj"
-                parsed = urlparse(anchor_url)
-                query_params = parse_qs(parsed.query)
-                post_payload = {
-                    "v": query_params["v"][0],
-                    "reason": "q",
-                    "k": query_params["k"][0],
-                    "c": base_token,
-                    "co": query_params["co"][0],
-                    "hl": query_params["hl"][0],
-                    "size": "invisible",
-                    "vh": "6581054572",
-                    "chr": "",
-                    "bg": "",
-                }
-
-                async with self.iwf.session.post(
-                    reload_url, data=post_payload, proxy=self.proxy
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    text = await resp.text()
-                    token_match = re.search(r'rresp","(.*?)"', text)
-                    if token_match:
-                        return token_match.group(1)
-        except Exception as e:
-            logger.error(f"获取 recaptcha token 过程中发生异常: {str(e)}")
-        return None
+        if not CURL_CFFI_AVAILABLE:
+            return None
+        return await self._get_recaptcha_token_curl(base_url)
