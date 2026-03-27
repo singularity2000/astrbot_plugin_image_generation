@@ -40,6 +40,12 @@
                         "hint": "curl_cffi 的 impersonate 参数列表。每次请求会按顺序轮换使用，以规避风控。建议保留 5-10 个不同的主流浏览器指纹。",
                         "items": { "type": "string", "description": "指纹名称" }
                     },
+                    "session_aging_threshold": {
+                        "description": "会话老化阈值",
+                        "type": "int",
+                        "default": 5,
+                        "hint": "每完成指定次数的请求尝试后，主动销毁会话并轮换浏览器指纹。值越小越激进（更快轮换指纹），越大越稳定。逆向接口建议 3-10。"
+                    },
                     "verbose_logging": {
                         "description": "显示详细请求信息",
                         "type": "bool",

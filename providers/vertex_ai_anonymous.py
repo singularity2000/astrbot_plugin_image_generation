@@ -41,11 +41,17 @@ class VertexAIAnonymousProvider(BaseProvider):
         self.impersonate_index = 0
         self.request_count = 0
         self._curl_session = None
+        # 并发控制：避免 in-flight 请求被 close() 误伤。
+        # 设计目标：不串行化整个 generate；只在切换/创建 session 与更新计数时做极短临界区保护。
+        self._session_lock = asyncio.Lock()
+        self._inflight_sessions: dict[object, int] = {}
+        self._retired_sessions: set[object] = set()
 
-    async def _get_curl_session(self):
-        """获取或创建持久化的 curl_cffi 会话"""
+    async def _get_or_create_active_session_locked(self):
+        """在持有 _session_lock 的前提下获取/创建 active session。"""
         if not CURL_CFFI_AVAILABLE:
             return None
+
         if self._curl_session is None:
             imp_list = self.node.get(
                 "impersonate_list", ["chrome131", "firefox135", "safari18_0"]
@@ -62,13 +68,87 @@ class VertexAIAnonymousProvider(BaseProvider):
                 )
 
             self._curl_session = CurlSession(impersonate=impersonate, proxy=self.proxy)
+
         return self._curl_session
+
+    async def _acquire_curl_session(self):
+        """获取可用 session，并增加 in-flight 引用计数。"""
+        if not CURL_CFFI_AVAILABLE:
+            return None
+
+        async with self._session_lock:
+            session = await self._get_or_create_active_session_locked()
+            if session is None:
+                return None
+            self._inflight_sessions[session] = (
+                self._inflight_sessions.get(session, 0) + 1
+            )
+            return session
+
+    async def _release_curl_session(self, session) -> None:
+        """释放 session 的 in-flight 引用；若已退役且无人使用则真正关闭。"""
+        if session is None:
+            return
+
+        to_close = None
+        async with self._session_lock:
+            current = self._inflight_sessions.get(session, 0)
+            if current <= 1:
+                self._inflight_sessions.pop(session, None)
+            else:
+                self._inflight_sessions[session] = current - 1
+
+            if (
+                session in self._retired_sessions
+                and self._inflight_sessions.get(session, 0) == 0
+            ):
+                self._retired_sessions.discard(session)
+                to_close = session
+
+        # close() 可能涉及底层资源回收；放到锁外，避免阻塞其他协程进入临界区。
+        if to_close is not None:
+            try:
+                to_close.close()
+            except Exception:
+                pass
+
+    async def _retire_active_session(self) -> None:
+        """退役当前 active session：后续请求会创建新会话；旧会话等待 in-flight 结束再关闭。"""
+        to_close = None
+        async with self._session_lock:
+            session = self._curl_session
+            if session is None:
+                return
+
+            # 标记退役，并清空 active 指针，让后续请求创建新会话。
+            self._retired_sessions.add(session)
+            self._curl_session = None
+
+            # 若当前无人使用，可立即关闭；否则延迟到 release 时关闭。
+            if self._inflight_sessions.get(session, 0) == 0:
+                self._retired_sessions.discard(session)
+                to_close = session
+
+        if to_close is not None:
+            try:
+                to_close.close()
+            except Exception:
+                pass
+
+    async def _get_curl_session(self):
+        """获取或创建持久化的 curl_cffi 会话。
+
+        注意：该方法不做 in-flight 引用计数，保留用于兼容/内部调用。
+        新代码应优先使用 _acquire_curl_session/_release_curl_session。
+        """
+        if not CURL_CFFI_AVAILABLE:
+            return None
+        async with self._session_lock:
+            return await self._get_or_create_active_session_locked()
 
     async def close(self):
         """关闭 curl_cffi 会话"""
-        if self._curl_session:
-            self._curl_session.close()
-            self._curl_session = None
+        await self._retire_active_session()
 
     async def generate(
         self, image_bytes_list: List[bytes], prompt: str
@@ -76,10 +156,15 @@ class VertexAIAnonymousProvider(BaseProvider):
         if not CURL_CFFI_AVAILABLE:
             return "Vertex AI 生成失败: 环境缺失 curl_cffi，无法规避 Google 指纹风控。请安装 curl_cffi 后重试。"
 
-        # 会话老化机制：成功请求50次后主动轮换
-        if self.request_count >= 50:
+        # 读取会话老化阈值（默认 5 次）
+        aging_threshold = self.node.get("session_aging_threshold", 5)
+
+        # 会话老化机制：达到阈值后主动轮换指纹
+        if self.request_count >= aging_threshold:
             if self.node.get("verbose_logging", True):
-                logger.info("[VertexAI] 会话老化 (50次请求)，主动销毁并轮换指纹")
+                logger.info(
+                    f"[VertexAI] 会话老化 ({self.request_count}次请求)，主动销毁并轮换指纹"
+                )
             await self.close()
             self.request_count = 0
 
@@ -100,7 +185,7 @@ class VertexAIAnonymousProvider(BaseProvider):
         last_err = "未知错误"
         token = await self._get_recaptcha_token(recaptcha_base)
         if not token:
-            return "Vertex AI 生成失败: 获取 recaptcha token 失败"
+            logger.warning("首次获取 recaptcha token 失败，将尝试进入重试逻辑自动恢复")
 
         # 当前 recaptcha token 的本地尝试次数：
         # 经验上在 Failed to verify action 场景下，第二次提交同 token 可能成功
@@ -111,10 +196,10 @@ class VertexAIAnonymousProvider(BaseProvider):
         while attempt < self.max_retry:
             attempt += 1
 
-            # 随机退避与验证码刷新逻辑 (除第一次尝试外)
-            if attempt > 1:
-                # 借鉴 big_banana: 资源耗尽 (8) 或 Token 失效 (3) 时刷新验证码
-                if error_status_code in [3, 8]:
+            # 随机退避与验证码刷新逻辑 (除第一次尝试外；若初始 token 缺失也需要执行)
+            if attempt > 1 or not token:
+                # 借鉴 big_banana: 资源耗尽 (8) 或 Token 失效 (3) 时刷新验证码，或者初始 token 缺失
+                if error_status_code in [3, 8] or not token:
                     new_token = await self._get_recaptcha_token(recaptcha_base)
                     if new_token:
                         token = new_token
@@ -122,50 +207,62 @@ class VertexAIAnonymousProvider(BaseProvider):
                     else:
                         last_err = "获取 recaptcha token 失败"
                         await self.close()
+                        self.request_count = 0  # 被动轮换后重置计数
 
                 await asyncio.sleep(next_delay)
 
             error_status_code = None
-            body["variables"]["recaptchaToken"] = token
-            api_url = self._build_api_url(vertex_base)
-
             # 重置本轮错误状态
             current_iter_err = None
 
-            # 执行生图请求 (使用 curl_cffi)
-            try:
-                headers = {
-                    "referer": "https://console.cloud.google.com/vertex-ai",
-                    "Content-Type": "application/json",
-                    "Origin": "https://console.cloud.google.com",
-                }
-                session = await self._get_curl_session()
-                if not session:
-                    raise RuntimeError("无法创建 curl_cffi 会话")
+            if not token:
+                current_iter_err = "获取 recaptcha token 失败"
 
-                resp = await session.post(
-                    api_url, json=body, headers=headers, timeout=api_timeout
-                )
+            if not current_iter_err:
+                body["variables"]["recaptchaToken"] = token
+                api_url = self._build_api_url(vertex_base)
 
-                if resp.status_code != 200:
-                    error_status_code = 8 if resp.status_code == 429 else None
-                    current_iter_err = f"API请求失败 (HTTP {resp.status_code})"
-                    if resp.status_code != 429:
-                        await self.close()
-                else:
-                    result = resp.json()
-                    parsed = self._parse_result(result)
-                    if parsed:
-                        error_status_code = parsed["status_code"]
-                        if parsed["image_data"]:
-                            self.request_count += 1
-                            return base64.b64decode(parsed["image_data"])
-                        if parsed["safety_blocked"]:
-                            return parsed["last_err"]
-                        current_iter_err = parsed["last_err"]
-            except Exception as e:
-                current_iter_err = f"Vertex AI 请求异常: {str(e)}"
-                await self.close()
+                # 执行生图请求 (使用 curl_cffi)
+                # 每次请求尝试都计数（触发老化机制），放在开头确保只计一次
+                async with self._session_lock:
+                    self.request_count += 1
+                try:
+                    headers = {
+                        "referer": "https://console.cloud.google.com/vertex-ai",
+                        "Content-Type": "application/json",
+                        "Origin": "https://console.cloud.google.com",
+                    }
+                    session = await self._acquire_curl_session()
+                    if not session:
+                        raise RuntimeError("无法创建 curl_cffi 会话")
+
+                    try:
+                        resp = await session.post(
+                            api_url, json=body, headers=headers, timeout=api_timeout
+                        )
+                    finally:
+                        await self._release_curl_session(session)
+
+                    if resp.status_code != 200:
+                        error_status_code = 8 if resp.status_code == 429 else None
+                        current_iter_err = f"API请求失败 (HTTP {resp.status_code})"
+                        if resp.status_code != 429:
+                            await self.close()
+                            self.request_count = 0  # 被动轮换后重置计数
+                    else:
+                        result = resp.json()
+                        parsed = self._parse_result(result)
+                        if parsed:
+                            error_status_code = parsed["status_code"]
+                            if parsed["image_data"]:
+                                return base64.b64decode(parsed["image_data"])
+                            if parsed["safety_blocked"]:
+                                return parsed["last_err"]
+                            current_iter_err = parsed["last_err"]
+                except Exception as e:
+                    current_iter_err = f"Vertex AI 请求异常: {str(e)}"
+                    await self.close()
+                    self.request_count = 0  # 被动轮换后重置计数
 
             # --- 统一错误处理与重试逻辑 ---
             if current_iter_err:
@@ -177,6 +274,9 @@ class VertexAIAnonymousProvider(BaseProvider):
                 and "Failed to verify action" in last_err
                 and captcha_try_count < 1
             ):
+                # FVA 复用 token 不算新尝试，减回去
+                async with self._session_lock:
+                    self.request_count -= 1
                 captcha_try_count += 1
                 next_delay = 2.0
                 logger.info(
@@ -310,7 +410,7 @@ class VertexAIAnonymousProvider(BaseProvider):
 
     async def _get_recaptcha_token_curl(self, base_url: str) -> Optional[str]:
         """使用 curl_cffi 获取 Recaptcha Token，保持指纹一致性"""
-        session = await self._get_curl_session()
+        session = await self._acquire_curl_session()
         if not session:
             return None
 
@@ -318,60 +418,67 @@ class VertexAIAnonymousProvider(BaseProvider):
 
         try:
             for _ in range(3):
-                cb = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-                anchor_url = (
-                    f"{base_url}/recaptcha/enterprise/anchor?ar=1"
-                    f"&k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj"
-                    f"&co=aHR0cHM6Ly9jb25zb2xlLmNsb3VkLmdvb2dsZS5jb206NDQz"
-                    f"&hl=zh-CN&v=jdMmXeCQEkPbnFDy9T04NbgJ"
-                    f"&size=invisible&anchor-ms=20000&execute-ms=15000&cb={cb}"
-                )
+                try:
+                    cb = "".join(
+                        random.choices(string.ascii_letters + string.digits, k=10)
+                    )
+                    anchor_url = (
+                        f"{base_url}/recaptcha/enterprise/anchor?ar=1"
+                        f"&k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj"
+                        f"&co=aHR0cHM6Ly9jb25zb2xlLmNsb3VkLmdvb2dsZS5jb206NDQz"
+                        f"&hl=zh-CN&v=jdMmXeCQEkPbnFDy9T04NbgJ"
+                        f"&size=invisible&anchor-ms=20000&execute-ms=15000&cb={cb}"
+                    )
 
-                resp = await session.get(anchor_url, headers=headers)
-                if resp.status_code != 200:
-                    continue
+                    resp = await session.get(anchor_url, headers=headers)
+                    if resp.status_code != 200:
+                        continue
 
-                soup = BeautifulSoup(resp.text, "html.parser")
-                token_input = soup.find("input", {"id": "recaptcha-token"})
-                if not token_input:
-                    continue
-                base_token = token_input.get("value")
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    token_input = soup.find("input", {"id": "recaptcha-token"})
+                    if not token_input:
+                        continue
+                    base_token = token_input.get("value")
 
-                reload_url = f"{base_url}/recaptcha/enterprise/reload?k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj"
-                parsed = urlparse(anchor_url)
-                query_params = parse_qs(parsed.query)
-                post_payload = {
-                    "v": query_params["v"][0],
-                    "reason": "q",
-                    "k": query_params["k"][0],
-                    "c": base_token,
-                    "co": query_params["co"][0],
-                    "hl": query_params["hl"][0],
-                    "size": "invisible",
-                    "vh": "6581054572",
-                    "chr": "",
-                    "bg": "",
-                }
+                    reload_url = f"{base_url}/recaptcha/enterprise/reload?k=6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj"
+                    parsed = urlparse(anchor_url)
+                    query_params = parse_qs(parsed.query)
+                    post_payload = {
+                        "v": query_params["v"][0],
+                        "reason": "q",
+                        "k": query_params["k"][0],
+                        "c": base_token,
+                        "co": query_params["co"][0],
+                        "hl": query_params["hl"][0],
+                        "size": "invisible",
+                        "vh": "6581054572",
+                        "chr": "",
+                        "bg": "",
+                    }
 
-                resp = await session.post(
-                    reload_url,
-                    data=post_payload,
-                    headers={
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "Origin": "https://console.cloud.google.com",
-                        **headers,
-                    },
-                )
-                if resp.status_code != 200:
-                    continue
+                    resp = await session.post(
+                        reload_url,
+                        data=post_payload,
+                        headers={
+                            "Content-Type": "application/x-www-form-urlencoded",
+                            "Origin": "https://console.cloud.google.com",
+                            **headers,
+                        },
+                    )
+                    if resp.status_code != 200:
+                        continue
 
-                token_match = re.search(r'rresp","(.*?)"', resp.text)
-                if token_match:
-                    return token_match.group(1)
-        except Exception as e:
-            logger.error(f"curl_cffi 获取 recaptcha token 异常: {str(e)}")
-            await self.close()
-        return None
+                    token_match = re.search(r'rresp","(.*?)"', resp.text)
+                    if token_match:
+                        return token_match.group(1)
+                except Exception as e:
+                    logger.warning(f"curl_cffi 获取 recaptcha token 异常: {str(e)}")
+                    await self.close()
+                    async with self._session_lock:
+                        self.request_count = 0  # 被动轮换后重置计数
+            return None
+        finally:
+            await self._release_curl_session(session)
 
     async def _get_recaptcha_token(self, base_url: str) -> Optional[str]:
         if not CURL_CFFI_AVAILABLE:
